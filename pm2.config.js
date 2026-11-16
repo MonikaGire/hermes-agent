@@ -1,0 +1,41 @@
+/** @type {import('pm2').ProcessDescription[]} */
+module.exports = [
+  {
+    name: 'hermes-backend',
+    script: './apps/backend/dist/index.js',
+    node_args: '--require dotenv/config',
+    instances: 2,
+    exec_mode: 'cluster',
+    watch: false,
+    env: {
+      NODE_ENV: 'production',
+      PORT: 7000,
+      DOTENV_CONFIG_PATH: '/var/www/erp-agent/.env',
+    },
+    error_file: './logs/backend-error.log',
+    out_file: './logs/backend-out.log',
+    merge_logs: true,
+    max_memory_restart: '512M',
+    restart_delay: 3000,
+    autorestart: true,
+  },
+  {
+    name: 'hermes-frontend',
+    script: 'node_modules/.bin/next',
+    args: 'start --port 3003',
+    cwd: './apps/frontend',
+    instances: 1,
+    exec_mode: 'fork',
+    watch: false,
+    node_args: '--require /var/www/erp-agent/node_modules/dotenv/config',
+    env: {
+      NODE_ENV: 'production',
+      PORT: 3003,
+      DOTENV_CONFIG_PATH: '/var/www/erp-agent/.env',
+    },
+    error_file: './logs/frontend-error.log',
+    out_file: './logs/frontend-out.log',
+    max_memory_restart: '768M',
+    autorestart: true,
+  },
+];
