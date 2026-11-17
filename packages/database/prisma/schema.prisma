@@ -274,6 +274,7 @@ model ConversationMessage {
   fromEmail      String?
   toEmail        String?
   gmailMessageId String?
+  rfcMessageId   String?
   intent         String?
   intentDetails  Json?
   draftBody      String?
