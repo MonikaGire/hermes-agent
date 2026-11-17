@@ -18,6 +18,7 @@ export type EmailStatus =
   | 'draft'
   | 'pending_approval'
   | 'approved'
+  | 'sending'
   | 'sent'
   | 'skipped';
 
