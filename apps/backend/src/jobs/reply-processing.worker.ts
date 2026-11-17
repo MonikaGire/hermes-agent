@@ -5,6 +5,8 @@ import type { Prisma } from '@hermes/database';
 import { logger } from '../config/logger.js';
 import { GmailInboxService } from '../integrations/gmail-inbox.service.js';
 import { logActivity } from '../services/activity.service.js';
+import { prepareScheduledFollowUp } from '../services/follow-up.service.js';
+import { inboxPollWindow } from './reply-poll-policy.js';
 
 export interface ReplyProcessingJobData {
   conversationId?: string;
@@ -32,34 +34,47 @@ export function createReplyProcessingWorker(): Worker {
   const worker = new Worker<ReplyProcessingJobData, ProcessedReply[]>(
     'reply-processing',
     async (job: Job<ReplyProcessingJobData>) => {
-      logger.info('Reply processing job started', { jobId: job.id });
+      logger.info('Reply processing job started', { jobId: job.id, jobName: job.name });
       const results: ProcessedReply[] = [];
+
+      // Scheduled follow-ups are not Gmail inbox polls.
+      if (job.name === 'follow-up-due') {
+        if (!job.data.conversationId) throw new Error('Missing conversationId on follow-up job');
+        await prepareScheduledFollowUp(job.data.conversationId);
+        return results;
+      }
+      if (job.name !== 'gmail-poll') {
+        throw new Error('Unknown reply-processing job: ' + job.name);
+      }
 
       const gmail = new GmailInboxService();
 
       // Find the last time we polled Gmail
       const lastPollSetting = await prisma.setting.findUnique({ where: { key: 'gmailLastPollAt' } });
-      const lastPollAt = lastPollSetting?.value
-        ? new Date(lastPollSetting.value as string)
-        : new Date(Date.now() - 60 * 60 * 1000); // default: 1 hour ago
-
-      const newReplies = await gmail.fetchNewReplies(lastPollAt);
+      const pollStartedAt = new Date();
+      const { since, checkpoint } = inboxPollWindow(lastPollSetting?.value, pollStartedAt);
+      const newReplies = await gmail.fetchNewReplies(since);
       logger.info('Gmail replies fetched', { count: newReplies.length });
 
+      let failedMessages = 0;
       for (const reply of newReplies) {
         try {
           const result = await processOneReply(reply, gmail);
           if (result) results.push(result);
         } catch (err) {
+          failedMessages++;
           logger.error('Reply processing failed for message', { gmailId: reply.id, error: err });
         }
       }
 
-      // Update last poll timestamp
+      // Fail closed: never advance past messages that failed to process.
+      if (failedMessages) {
+        throw new Error('Inbox poll had ' + failedMessages + ' processing failures; checkpoint retained');
+      }
       await prisma.setting.upsert({
         where: { key: 'gmailLastPollAt' },
-        update: { value: new Date().toISOString() },
-        create: { key: 'gmailLastPollAt', value: new Date().toISOString() },
+        update: { value: checkpoint.toISOString() },
+        create: { key: 'gmailLastPollAt', value: checkpoint.toISOString() },
       });
 
       logger.info('Reply processing complete', { processed: results.length });
