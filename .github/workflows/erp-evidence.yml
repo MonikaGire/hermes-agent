@@ -7,6 +7,8 @@ on:
       - 'packages/shared/**'
       - 'apps/backend/**'
       - 'tests/**'
+      - 'scripts/metal-pilot.mjs'
+      - 'PILOT.ps1'
       - '.github/workflows/erp-evidence.yml'
   workflow_dispatch:
 
@@ -28,6 +30,7 @@ jobs:
         run: |
           node --check scripts/metal-pilot.mjs
           node scripts/metal-pilot.mjs --self-test
+          node scripts/metal-pilot.mjs --self-test-auth
 
   typescript:
     runs-on: ubuntu-latest
