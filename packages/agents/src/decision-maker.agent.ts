@@ -7,7 +7,13 @@ export interface DecisionMakerInput {
   industry: string;
   country: string;
   employeeCount?: number;
-  knownContacts?: Array<{ name: string; role: string }>;
+  knownContacts?: Array<{
+    name: string;
+    role: string;
+    email?: string;
+    linkedinUrl?: string;
+    sourceUrl?: string;
+  }>;
 }
 
 export interface DecisionMakerOutput {
@@ -23,51 +29,46 @@ export interface DecisionMakerOutput {
   reasoning: string;
 }
 
-const SYSTEM_PROMPT = `You are an expert B2B sales researcher specializing in manufacturing companies.
-
-Your task is to identify the right decision makers for an ERP system sale.
-
-For manufacturing companies, the typical ERP buying committee:
-- Primary decision maker: CEO, COO, Operations Director, Manufacturing Director
-- Secondary influencer: IT Director, Finance Director, Production Manager
-- Champion: Plant Manager, Supply Chain Manager
-
-Company size guidelines:
-- 20-50 employees: CEO/Owner is primary decision maker
-- 50-150 employees: COO or Operations Director
-- 150-500 employees: Operations Director or Manufacturing Director, with IT Director as influencer
-
-Output valid JSON only.`;
-
+/**
+ * Never ask an LLM to invent a person. Known contacts need their own
+ * first-party or verified-directory source before being promoted.
+ */
 export class DecisionMakerAgent extends BaseAgent<DecisionMakerInput, DecisionMakerOutput> {
   protected readonly agentName = 'DecisionMakerAgent';
 
   async run(input: DecisionMakerInput): Promise<AgentResult<DecisionMakerOutput>> {
     return this.wrap(async () => {
-      const { content } = await this.chat(
-        SYSTEM_PROMPT,
-        `Identify decision makers for:
-Company: ${input.companyName}
-Industry: ${input.industry}
-Country: ${input.country}
-Employees: ${input.employeeCount ?? 'Unknown'}
-${input.knownContacts?.length ? `Known contacts: ${input.knownContacts.map((c) => `${c.name} (${c.role})`).join(', ')}` : ''}
-
-Return JSON:
-{
-  "targetRoles": ["role 1", "role 2"],
-  "primaryContact": {
-    "name": "if known from context",
-    "role": "Operations Director",
-    "confidence": 0.8
-  },
-  "outreachPersona": "describe who we're targeting and why",
-  "reasoning": "why these roles are the right decision makers for this company"
-}`,
-        { jsonMode: true, temperature: 0.3 },
+      const size = input.employeeCount ?? 0;
+      const targetRoles = size > 0 && size <= 50
+        ? ['Founder', 'Managing Director', 'Owner', 'Operations Director']
+        : size > 50 && size <= 150
+          ? ['Operations Director', 'Managing Director', 'COO', 'Finance Director']
+          : ['Operations Director', 'Manufacturing Director', 'IT Director', 'CFO'];
+      const candidate = (input.knownContacts ?? []).find((c) =>
+        c.sourceUrl &&
+        /^https?:\/\//i.test(c.sourceUrl) &&
+        c.name.trim().split(/\s+/).length >= 2 &&
+        !/^(?:contact|operations manager|unknown|decision maker)$/i.test(c.name.trim()) &&
+        /(director|founder|owner|chief|head|manager|president|ceo|coo|cfo)/i.test(c.role),
       );
+      const primaryContact = candidate
+        ? {
+            name: candidate.name.trim(),
+            role: candidate.role,
+            ...(candidate.email ? { email: candidate.email } : {}),
+            ...(candidate.linkedinUrl ? { linkedinUrl: candidate.linkedinUrl } : {}),
+            confidence: 0.7, // A supplied source still requires separate human verification.
+          }
+        : undefined;
 
-      return this.parseJSON<DecisionMakerOutput>(content);
+      return {
+        targetRoles,
+        primaryContact,
+        outreachPersona: targetRoles[0] ?? 'Operations Director',
+        reasoning: primaryContact
+          ? 'Named contact was supplied with a source. Verify current role and email before outreach.'
+          : 'No sourced named contact supplied. Research the buying committee; do not invent a person.',
+      };
     });
   }
 }
