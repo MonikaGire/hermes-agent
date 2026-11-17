@@ -8,9 +8,11 @@ on:
       - 'apps/backend/**'
       - 'tests/**'
       - '.github/workflows/erp-evidence.yml'
-  push:
-    branches:
-      - 'feat/metal-erp-evidence-first-quality-gates'
+  workflow_dispatch:
+
+concurrency:
+  group: erp-evidence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   evidence-tests:
