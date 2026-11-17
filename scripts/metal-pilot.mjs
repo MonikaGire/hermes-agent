@@ -100,7 +100,7 @@ async function main() {
     const b = classify({ title:'Manufacturer jobs',snippet:'Metal fabricator uses manual steel stock management',source_url:'https://linkedin.com/jobs/123' });
     const c = csv([{title:'=HYPERLINK("malicious")'}],['title']);
     if (a.status !== 'REVIEW_FIRST_PARTY_SOURCE' || b.status !== 'THIRD_PARTY_NEEDS_COMPANY_MATCH' || !c.includes("'=HYPERLINK")) {
-      throw new Error('Pilot classifier self-test failed');
+      throw new Error('Pilot classifier self-test failed: first_party=' + a.status + ', third_party=' + b.status + ', csv_escaped=' + c.includes("'=HYPERLINK"));
     }
     console.log('Pilot self-tests passed. No network requests or emails were sent.');
     return;
