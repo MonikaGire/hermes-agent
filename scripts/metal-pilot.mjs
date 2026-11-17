@@ -78,6 +78,44 @@ function getKey() {
   const key = match?.[1]?.replace(/^['"]|['"]$/g,'').trim() ?? '';
   return key && !/^(your-|placeholder|replace)/i.test(key) ? key : '';
 }
+/** SerpAPI's account endpoint is free and does not consume search credits. */
+async function preflightSerpApi(key) {
+  const url = new URL('https://serpapi.com/account.json');
+  url.searchParams.set('api_key', key);
+  let response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  } catch {
+    throw new Error('Could not reach SerpAPI account validation. Check internet access and try again.');
+  }
+  if (response.status === 401) {
+    throw new Error('SerpAPI rejected the API key (HTTP 401). Copy the key from https://serpapi.com/manage-api-key. If phone verification is pending or failed, contact SerpAPI support. No searches were started.');
+  }
+  if (response.status === 403) {
+    throw new Error('SerpAPI account is not authorised (HTTP 403). Check account verification or contact SerpAPI support. No searches were started.');
+  }
+  if (!response.ok) {
+    throw new Error('SerpAPI account check returned HTTP ' + response.status + '. No searches were started.');
+  }
+  let account;
+  try {
+    account = await response.json();
+  } catch {
+    throw new Error('SerpAPI returned unreadable account data. No searches were started.');
+  }
+  // Account responses may contain the private API key: never print the full body.
+  const status = typeof account.account_status === 'string' ? account.account_status : '';
+  if (status && status.toLowerCase() !== 'active') {
+    throw new Error('SerpAPI account status is ' + status.replace(/[^a-z0-9 _-]/gi, '').slice(0, 50) + '. Complete account verification before running searches.');
+  }
+  const remaining = account.total_searches_left ?? account.plan_searches_left;
+  if (typeof remaining === 'number' && remaining <= 0) {
+    throw new Error('SerpAPI account has no searches remaining. The pilot did not start.');
+  }
+  console.log('SerpAPI account verified. Remaining monthly searches: ' +
+    (typeof remaining === 'number' ? remaining : 'not reported') + '.');
+}
+
 async function fetchSerpApi(key, recipe) {
   const url = new URL('https://serpapi.com/search.json');
   url.searchParams.set('engine','google');
@@ -87,6 +125,9 @@ async function fetchSerpApi(key, recipe) {
   url.searchParams.set('gl',recipe.gl);
   url.searchParams.set('api_key',key);
   const response = await fetch(url, { signal: AbortSignal.timeout(35000) });
+  if (response.status === 401) throw new Error('SerpAPI authentication failed (HTTP 401). Stop: the key is invalid or not authorised.');
+  if (response.status === 403) throw new Error('SerpAPI rejected this account (HTTP 403). Stop: check verification/permissions.');
+  if (response.status === 429) throw new Error('SerpAPI quota or rate limit reached (HTTP 429). Stop further searches.');
   if (!response.ok) throw new Error('Search provider returned HTTP ' + response.status);
   const body = await response.json();
   if (body.error) throw new Error(String(body.error).slice(0,180));
@@ -113,12 +154,15 @@ async function main() {
   }
 
   console.log('Read-only metal ERP lead pilot: NO emails, NO CRM imports, NO database changes.');
+  await preflightSerpApi(key);
   const all=[];
   const errors=[];
+  let searchesAttempted = 0;
   for(let i=0;i<searchRecipes.length;i++){
     const recipe=searchRecipes[i];
     process.stdout.write('Searching ' + (i+1) + '/' + searchRecipes.length + ': ' + recipe.sector + ' / ' + recipe.country + '\n');
     try {
+      searchesAttempted++;
       const results=await fetchSerpApi(key,recipe);
       for(const item of results) {
         const row={
@@ -129,7 +173,14 @@ async function main() {
         Object.assign(row,classify(row));
         all.push(row);
       }
-    }catch(e){errors.push(recipe.country + ' / ' + recipe.sector + ': ' + (e?.message||String(e)));}
+    }catch(e){
+      const message=e?.message||String(e);
+      errors.push(recipe.country + ' / ' + recipe.sector + ': ' + message);
+      if (/HTTP (401|403|429)|authentication failed|quota or rate limit/i.test(message)) {
+        console.error('Stopping after authentication/permission/quota failure; remaining searches skipped.');
+        break;
+      }
+    }
   }
 
   const dedup=new Map();
@@ -153,7 +204,7 @@ async function main() {
   const report=[
     'HERMES - METAL ERP LEAD RESEARCH PILOT',
     'Date: '+new Date().toISOString(),
-    'Live search queries attempted: '+searchRecipes.length,
+    'Live search queries attempted: '+searchesAttempted,
     'Unique search results: '+unique.length,
     'First-party evidence candidates for HUMAN REVIEW: '+prioritized.length,
     'Third-party clues needing company matching: '+thirdParty.length,
@@ -171,7 +222,7 @@ async function main() {
   ].join('\r\n');
   fs.writeFileSync(path.join(outputDir,prefix+'-SUMMARY.txt'),report,'utf8');
   console.log('\n'+report);
-  if(errors.length===searchRecipes.length){process.exitCode=1;}
+  if(errors.length===searchesAttempted && searchesAttempted>0){process.exitCode=1;}
 }
 
 main().catch(err=>{console.error('Pilot failed: '+(err?.message||String(err)));process.exitCode=1;});
