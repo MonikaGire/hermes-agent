@@ -34,5 +34,8 @@ jobs:
       - run: npm ci
       - run: npm run db:generate
       - run: npm run typecheck --workspace=packages/shared
+      - run: npm run build --workspace=packages/shared
       - run: npm run typecheck --workspace=packages/agents
+      - run: npx tsc -p packages/agents/tsconfig.json
+      - run: npm run build --workspace=packages/database
       - run: npm run typecheck --workspace=apps/backend
