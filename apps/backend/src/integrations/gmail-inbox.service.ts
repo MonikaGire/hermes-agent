@@ -254,7 +254,7 @@ export class GmailInboxService {
     const lines = [
       `From: ${opts.from.replace(/[\r\n]/g, ' ')}`,
       `To: ${opts.to.replace(/[\r\n]/g, ' ')}`,
-      `Subject: ${opts.subject.replace(/[\r\n]/g, ' ')}`
+      `Subject: ${opts.subject.replace(/[\r\n]/g, ' ')}`,
       `In-Reply-To: ${opts.inReplyTo}`,
       `References: ${opts.references}`,
       `MIME-Version: 1.0`,
