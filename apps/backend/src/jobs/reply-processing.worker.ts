@@ -136,6 +136,11 @@ async function processOneReply(
     return null;
   }
 
+  if (conversation.status === 'SUPPRESSED') {
+    logger.info('Ignored reply from suppressed company', { conversationId: conversation.id });
+    return null;
+  }
+
   // 2. Check for duplicate (already stored this gmailMessageId)
   const existing = await prisma.conversationMessage.findFirst({
     where: { gmailMessageId: reply.id },
