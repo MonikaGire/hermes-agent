@@ -352,8 +352,6 @@ export class ConversationService {
 
     if (!conversation || conversation.status === 'SUPPRESSED') return null;
 
-    if (conversation.status === 'SUPPRESSED') return null;
-
     // Skip duplicates
     const existing = await prisma.conversationMessage.findFirst({ where: { gmailMessageId: reply.id } });
     if (existing) return null;
@@ -415,8 +413,9 @@ export class ConversationService {
     }
 
     // Schedule follow-up for NOT_NOW
-    const followUpTime = typeof intentDetails.followUpAt === 'string'
-      ? new Date(intentDetails.followUpAt) : null;
+    const followUpAt = 'followUpAt' in intentDetails ? intentDetails.followUpAt : undefined;
+    const followUpTime = typeof followUpAt === 'string'
+      ? new Date(followUpAt) : null;
     if (intent === 'NOT_NOW' && followUpTime &&
       !Number.isNaN(followUpTime.getTime()) &&
       followUpTime > new Date() &&
