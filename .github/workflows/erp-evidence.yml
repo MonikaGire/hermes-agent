@@ -1,0 +1,38 @@
+name: ERP evidence safeguards
+
+on:
+  pull_request:
+    paths:
+      - 'packages/agents/**'
+      - 'packages/shared/**'
+      - 'apps/backend/**'
+      - 'tests/erp-evidence.test.mjs'
+      - '.github/workflows/erp-evidence.yml'
+  push:
+    branches:
+      - 'feat/metal-erp-evidence-first-quality-gates'
+
+jobs:
+  evidence-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Evidence-first prospect qualification tests
+        run: node --experimental-strip-types --test tests/erp-evidence.test.mjs
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run typecheck --workspace=packages/shared
+      - run: npm run typecheck --workspace=packages/agents
+      - run: npm run typecheck --workspace=apps/backend
