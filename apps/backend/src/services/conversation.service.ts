@@ -69,6 +69,7 @@ export class ConversationService {
 
   async approveDraft(conversationId: string, messageId: string, editedBody?: string) {
     const conversation = await this.getById(conversationId);
+    if (conversation.status === 'SUPPRESSED') throw new AppError('Cannot send to a suppressed conversation', 400);
     const draft = await prisma.conversationMessage.findUnique({ where: { id: messageId } });
 
     if (!draft || draft.conversationId !== conversationId) {
@@ -159,6 +160,7 @@ export class ConversationService {
 
   async regenerateDraft(conversationId: string) {
     const conversation = await this.getById(conversationId);
+    if (conversation.status === 'SUPPRESSED') throw new AppError('Cannot draft for a suppressed conversation', 400);
 
     // Delete existing draft
     await prisma.conversationMessage.deleteMany({
