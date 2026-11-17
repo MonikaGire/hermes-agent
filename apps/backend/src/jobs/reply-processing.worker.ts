@@ -7,6 +7,7 @@ import { GmailInboxService } from '../integrations/gmail-inbox.service.js';
 import { logActivity } from '../services/activity.service.js';
 import { prepareScheduledFollowUp } from '../services/follow-up.service.js';
 import { inboxPollWindow } from './reply-poll-policy.js';
+import { explicitContactStop } from '../services/reply-safety.policy.js';
 
 export interface ReplyProcessingJobData {
   conversationId?: string;
@@ -175,7 +176,12 @@ async function processOneReply(
     body: m.body,
   }));
 
-  const intentResult = await intentAgent.run({
+  const hardStop = explicitContactStop(reply.body);
+  const intentResult = hardStop ? { data: {
+    intent: hardStop, confidence: 1,
+    summary: 'Prospect explicitly requested no further contact.',
+    suggestedAction: 'Suppress this company and stop all outreach.',
+  } } : await intentAgent.run({
     inboundEmailBody: reply.body,
     conversationContext: {
       companyName: originalEmail.company.name,
@@ -244,14 +250,19 @@ async function processOneReply(
   }
 
   // 6. Handle NOT_NOW — schedule follow-up
-  if (intent === 'NOT_NOW' && intentDetails.followUpAt) {
+  const followUpTime = typeof intentDetails.followUpAt === 'string'
+    ? new Date(intentDetails.followUpAt) : null;
+  if (intent === 'NOT_NOW' && followUpTime &&
+    !Number.isNaN(followUpTime.getTime()) &&
+    followUpTime > new Date() &&
+    followUpTime < new Date(Date.now() + 365 * 86_400_000)) {
     await prisma.conversation.update({
       where: { id: conversation.id },
       data: {
         status: 'FOLLOW_UP_SCHEDULED',
         intent,
         lastMessageAt: reply.receivedAt,
-        followUpAt: new Date(intentDetails.followUpAt),
+        followUpAt: followUpTime,
         followUpNote: intentDetails.summary,
       },
     });
