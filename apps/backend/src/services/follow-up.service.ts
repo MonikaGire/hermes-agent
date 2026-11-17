@@ -35,8 +35,7 @@ export async function prepareScheduledFollowUp(conversationId: string): Promise<
       id: conversationId,
       status: 'FOLLOW_UP_SCHEDULED',
       intent: 'NOT_NOW',
-      suppressedAt: null,
-      followUpAt: { lte: now },
+      followUpAt: { lte: now }, // Status guards concurrent suppression; Mongo optional nulls may be missing.
     },
     data: { status: 'FOLLOW_UP_PREPARING' },
   });
