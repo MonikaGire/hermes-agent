@@ -36,8 +36,11 @@ export class ConversationReplyAgent extends BaseAgent<ConversationContext, Conve
         throw new Error('No reply draft permitted for suppressed or rejecting prospects');
       }
       const context = this.buildContext(input);
+      const followUpInstruction = input.draftPurpose === 'scheduled_follow_up'
+        ? '\nThis is a follow-up draft to be reviewed by a human, only because the prospect previously invited contact at this time. Do NOT write a fresh pitch. Refer to the actual prior exchange and reason; ask one simple question whether revisiting this is useful now. Never pretend you sent an earlier follow-up or invent a date, meeting time, or product result.'
+        : '';
       const { content } = await this.chat(
-        SYSTEM_PROMPT + '\nSERVICE KNOWLEDGE:\n' + serviceKnowledge(input.serviceMode),
+        SYSTEM_PROMPT + '\nSERVICE KNOWLEDGE:\n' + serviceKnowledge(input.serviceMode) + followUpInstruction,
         `${context}
 
 Write the reply. Return JSON:
@@ -61,6 +64,8 @@ For NEGATIVE or UNSUBSCRIBE: no draft must be generated.`,
     const parts = [
       `Prospect: ${input.contactName} (${input.contactRole}) at ${input.companyName}`,
       `Service: ${input.serviceMode.toUpperCase()}`,
+      `Draft purpose: ${input.draftPurpose ?? 'inbound_reply'}`,
+      ...(input.followUpReason ? [`Documented follow-up reason: ${input.followUpReason}`] : []),
       `Verified company context (may contain unverified assumptions; never state them as facts): ${input.researchSummary}`,
       ...(input.primaryOpportunity ? [`Primary opportunity: ${input.primaryOpportunity}`] : []),
       `\nOriginal email sent:`,
