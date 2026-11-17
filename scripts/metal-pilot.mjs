@@ -39,7 +39,7 @@ const excludedHostnames = [
 ];
 const metalTerms = /\b(?:steel|sheet[\s-]?metal|metal[\s-]?(?:fabricat\w*|process\w*|work\w*)|laser[\s-]?cut\w*|cnc|machin\w*|weld\w*|stainless|alumin(?:um|ium)|offcuts?|remnants?|coil[\s-]?slitt\w*|rebar)\b/i;
 const selectionTerms = /(?:\b(?:erp|mrp|inventory|production|warehouse)\s+(?:software|system|platform)\b.{0,110}\b(?:select\w*|evaluat\w*|replac\w*|implement\w*|migrat\w*|procure\w*|rfp|tender|build\w*|develop\w*)\b|\b(?:select\w*|evaluat\w*|replac\w*|implement\w*|migrat\w*|procure\w*|rfp|tender|build\w*|develop\w*)\b.{0,110}\b(?:erp|mrp|inventory|production|warehouse)\s+(?:software|system|platform)\b)/i;
-const painTerms = /\b(?:excel|spreadsheet\w*|manually?|paper[\s-]?based|(?:stock|inventory)[\s-]?(?:discrepanc\w*|varianc\w*|reconcil\w*)|offcuts?|remnants?|material[\s-]?(?:shortag\w*|traceab\w*)|heat[\s-]?number|job[\s-]?cost\w*|work[\s-]?in[\s-]?progress|production[\s-]?(?:delay\w*|bottleneck\w*|planning)|quotation[\s-]?register\w*|duplicat\w*[\s-]?entr\w*)\b/i;
+const painTerms = /\b(?:excel|spreadsheet\w*|manual(?:ly)?|paper[\s-]?based|(?:stock|inventory)[\s-]?(?:discrepanc\w*|varianc\w*|reconcil\w*)|offcuts?|remnants?|material[\s-]?(?:shortag\w*|traceab\w*)|heat[\s-]?number|job[\s-]?cost\w*|work[\s-]?in[\s-]?progress|production[\s-]?(?:delay\w*|bottleneck\w*|planning)|quotation[\s-]?register\w*|duplicat\w*[\s-]?entr\w*)\b/i;
 
 function csvCell(value) {
   const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
