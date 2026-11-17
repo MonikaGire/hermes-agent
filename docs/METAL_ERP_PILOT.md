@@ -8,11 +8,15 @@ Open PowerShell inside the new cloned hermes-agent folder and paste:
 
     git pull origin feat/metal-erp-evidence-first-quality-gates; powershell -NoProfile -ExecutionPolicy Bypass -File .\PILOT.ps1
 
-The script loads SERPAPI_KEY from the clone's .env if present. Otherwise it prompts for a key with characters hidden. It does not write the key into any report.
+The launcher prefers Brave Search (BRAVE_API_KEY), then a locally running SearXNG search service (SEARXNG_URL). If Docker Desktop is installed and running, it can start a local SearXNG instance for you, requiring no SerpAPI key. SerpAPI remains optional as a fallback. Any search key is read privately from your local .env or a hidden prompt; never commit or share keys.
 
-Node.js 22+ is required. MongoDB and Prisma are not needed for this pilot. A real SerpAPI key is needed for the live Google search.
+Node.js 22+ is required. MongoDB and Prisma are not needed for this pilot. For live research you need at least one usable provider: Docker Desktop with local SearXNG, a Brave Search API key, or a valid SerpAPI account. No single public provider is guaranteed to return results; upstream search engines can impose rate limits.
 
 The launcher writes files into pilot-results and opens the summary. Share the CSV or summary only, not .env, screenshots of API keys, or the entire project.
+
+## If your SerpAPI account returns HTTP 401
+
+Do not retry or pay SerpAPI just to fix authentication. Install and start Docker Desktop, then run the same command. The launcher will use local SearXNG when Docker is available. Alternatively, add a valid BRAVE_API_KEY in the local .env. Brave offers monthly free credit with an account, but may require a card for verification.
 
 ## Outputs
 
