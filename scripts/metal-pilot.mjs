@@ -136,6 +136,20 @@ async function fetchSerpApi(key, recipe) {
 }
 
 async function main() {
+  if (process.argv.includes('--self-test-auth')) {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ status: 401, ok: false });
+    try {
+      let blocked = false;
+      try { await preflightSerpApi('fake-test-key'); }
+      catch (error) { blocked = String(error?.message || error).includes('HTTP 401'); }
+      if (!blocked) throw new Error('Invalid-key preflight did not stop the pilot');
+      console.log('Authentication fail-fast self-test passed. No network requests or emails were sent.');
+      return;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
   if (process.argv.includes('--self-test')) {
     const a = classify({ title:'Example Steel fabrication inventory job',snippet:'We track stock in Excel spreadsheets and reconcile heat numbers',source_url:'https://example-steel.com/careers/stock' });
     const b = classify({ title:'Manufacturer jobs',snippet:'Metal fabricator uses manual steel stock management',source_url:'https://linkedin.com/jobs/123' });
