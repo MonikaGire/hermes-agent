@@ -5,6 +5,12 @@ import { AppError } from '../utils/AppError.js';
  * Outbound is a privilege earned by review, not by an LLM-generated
  * confidence score or a scraped email address.
  */
+export interface ApprovedErpEvidence {
+  sourceUrl: string;
+  evidenceText: string;
+  signalType: 'software_selection' | 'operational_pain';
+}
+
 export async function assertErpOutreachEligible(companyId: string, contact: {
   id: string;
   firstName: string;
@@ -12,7 +18,7 @@ export async function assertErpOutreachEligible(companyId: string, contact: {
   role: string;
   email: string | null;
   isVerified: boolean;
-} | null | undefined): Promise<void> {
+} | null | undefined): Promise<ApprovedErpEvidence> {
   if (!contact || !contact.email || !contact.isVerified) {
     throw new AppError('ERP outreach blocked: verify a real decision-maker and their business email first.', 400);
   }
@@ -42,4 +48,19 @@ export async function assertErpOutreachEligible(companyId: string, contact: {
   if (suppressed) {
     throw new AppError('ERP outreach blocked: this company has opted out or was suppressed.', 400);
   }
+  const meta = review.meta as Record<string, unknown> | null;
+  if (!meta || typeof meta['sourceUrl'] !== 'string' || typeof meta['evidenceText'] !== 'string' ||
+      !['software_selection', 'operational_pain'].includes(String(meta['signalType'])) ||
+      meta['vendorAlreadySelected'] !== false) {
+    throw new AppError('ERP outreach blocked: approved evidence is incomplete.', 400);
+  }
+  const date = typeof meta['observedAt'] === 'string' ? new Date(meta['observedAt']) : null;
+  if (!date || Number.isNaN(date.getTime()) || (Date.now() - date.getTime()) > 365 * 86_400_000) {
+    throw new AppError('ERP outreach blocked: evidence is stale or undated.', 400);
+  }
+  return {
+    sourceUrl: meta['sourceUrl'],
+    evidenceText: meta['evidenceText'],
+    signalType: meta['signalType'] as ApprovedErpEvidence['signalType'],
+  };
 }
