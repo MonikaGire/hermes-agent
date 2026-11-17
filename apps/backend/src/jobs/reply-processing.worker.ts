@@ -250,8 +250,9 @@ async function processOneReply(
   }
 
   // 6. Handle NOT_NOW — schedule follow-up
-  const followUpTime = typeof intentDetails.followUpAt === 'string'
-    ? new Date(intentDetails.followUpAt) : null;
+  const followUpAt = 'followUpAt' in intentDetails ? intentDetails.followUpAt : undefined;
+  const followUpTime = typeof followUpAt === 'string'
+    ? new Date(followUpAt) : null;
   if (intent === 'NOT_NOW' && followUpTime &&
     !Number.isNaN(followUpTime.getTime()) &&
     followUpTime > new Date() &&
@@ -271,7 +272,7 @@ async function processOneReply(
       entityType: 'conversation',
       entityId: conversation.id,
       companyId: conversation.companyId,
-      meta: { followUpAt: intentDetails.followUpAt, reason: intentDetails.summary },
+      meta: { followUpAt: followUpTime.toISOString(), reason: intentDetails.summary },
     });
     await gmail.markAsRead(reply.id);
     return { conversationId: conversation.id, gmailMessageId: reply.id, intent, draftReady: false };
@@ -312,6 +313,7 @@ async function processOneReply(
       fromEmail: reply.from,
       toEmail: reply.to,
       gmailMessageId: reply.id,
+      rfcMessageId: reply.rfcMessageId ?? null,
       intent,
       intentDetails: null,
       draftBody: null,
