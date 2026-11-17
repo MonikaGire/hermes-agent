@@ -3,6 +3,9 @@ import type { Prisma, ConversationStatus } from '@hermes/database';
 import { AppError } from '../utils/AppError.js';
 import { GmailInboxService } from '../integrations/gmail-inbox.service.js';
 import { logActivity } from './activity.service.js';
+import { assertCompanyNotSuppressed } from './suppression.service.js';
+import { inboxPollWindow } from '../jobs/reply-poll-policy.js';
+import { plainTextToSafeHtml } from '../utils/email-content.js';
 
 export class ConversationService {
   private readonly gmail = new GmailInboxService();
@@ -69,80 +72,109 @@ export class ConversationService {
 
   async approveDraft(conversationId: string, messageId: string, editedBody?: string) {
     const conversation = await this.getById(conversationId);
-    if (conversation.status === 'SUPPRESSED') throw new AppError('Cannot send to a suppressed conversation', 400);
-    const draft = await prisma.conversationMessage.findUnique({ where: { id: messageId } });
+    await assertCompanyNotSuppressed(conversation.companyId);
 
-    if (!draft || draft.conversationId !== conversationId) {
-      throw new AppError('Draft message not found', 404);
+    const draft = await prisma.conversationMessage.findUnique({ where: { id: messageId } });
+    if (!draft || draft.conversationId !== conversationId ||
+      draft.direction !== 'DRAFT' || draft.sentAt || draft.approvedAt) {
+      throw new AppError('No pending, unsent draft with this ID', 400);
     }
 
-    const bodyToSend = editedBody ?? draft.body;
+    const bodyToSend = (editedBody ?? draft.body).trim();
+    if (!bodyToSend) throw new AppError('Reply body cannot be empty', 400);
     const contact = conversation.email.contact;
-
     if (!contact?.email) throw new AppError('Contact email not found', 400);
 
-    // Send via Gmail if configured, otherwise fall back to SMTP
+    // Single sender claims the draft. On an ambiguous provider/network failure,
+    // keep REPLY_SENDING for human reconciliation rather than automatically
+    // retrying: email delivery is not safely idempotent.
+    const claim = await prisma.conversation.updateMany({
+      where: { id: conversationId, status: 'DRAFT_READY' },
+      data: { status: 'REPLY_SENDING' },
+    });
+    if (claim.count !== 1) {
+      throw new AppError('Reply is not ready or is already being sent; review its status first', 409);
+    }
+
     let gmailResult: { gmailMessageId: string; gmailThreadId: string } | null = null;
+    try {
+      if (conversation.gmailThreadId) {
+        const lastInbound = conversation.messages
+          .filter((m) => m.direction === 'INBOUND').at(-1);
+        const rfcId = lastInbound?.rfcMessageId ||
+          (lastInbound?.gmailMessageId
+            ? await this.gmail.getRfcMessageId(lastInbound.gmailMessageId)
+            : null) ||
+          conversation.email.messageId;
+        if (!rfcId || !/^<[^<>\r\n]+@[^<>\r\n]+>$/.test(rfcId.trim())) {
+          throw new AppError('Cannot thread this reply without a valid RFC Message-ID. Resolve it before sending.', 409);
+        }
 
-    if (conversation.gmailThreadId) {
-      gmailResult = await this.gmail.sendReply({
-        to: contact.email,
-        subject: draft.subject ?? `Re: ${conversation.email.subject}`,
-        body: bodyToSend,
-        threadId: conversation.gmailThreadId,
-        inReplyTo: conversation.gmailThreadId,
+        gmailResult = await this.gmail.sendReply({
+          to: contact.email,
+          subject: draft.subject ?? 'Re: ' + conversation.email.subject,
+          body: bodyToSend,
+          threadId: conversation.gmailThreadId,
+          inReplyTo: rfcId.trim(),
+        });
+        if (!gmailResult) {
+          throw new AppError('Gmail send was not confirmed. Check the Sent folder before retrying manually; SMTP fallback disabled.', 502);
+        }
+      } else {
+        const { EmailSenderService } = await import('../integrations/email-sender.service.js');
+        const sender = new EmailSenderService();
+        await sender.send({
+          to: contact.email,
+          subject: draft.subject ?? 'Re: ' + conversation.email.subject,
+          html: plainTextToSafeHtml(bodyToSend),
+          text: bodyToSend,
+          ...(conversation.email.messageId && {
+            inReplyTo: conversation.email.messageId,
+            references: conversation.email.messageId,
+          }),
+        });
+      }
+
+      await prisma.conversationMessage.update({
+        where: { id: messageId },
+        data: {
+          body: bodyToSend,
+          approvedAt: new Date(),
+          sentAt: new Date(),
+          gmailMessageId: gmailResult?.gmailMessageId ?? null,
+        },
       });
-    }
-
-    if (!gmailResult) {
-      // Fall back to SMTP sender
-      const { EmailSenderService } = await import('../integrations/email-sender.service.js');
-      const sender = new EmailSenderService();
-      await sender.send({
-        to: contact.email,
-        subject: draft.subject ?? `Re: ${conversation.email.subject}`,
-        html: bodyToSend.replace(/\n/g, '<br>'),
-        text: bodyToSend,
+      await prisma.conversationMessage.create({
+        data: {
+          conversationId,
+          direction: 'OUTBOUND',
+          subject: draft.subject ?? 'Re: ' + conversation.email.subject,
+          body: bodyToSend,
+          toEmail: contact.email,
+          sentAt: new Date(),
+          gmailMessageId: gmailResult?.gmailMessageId ?? null,
+        },
       });
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: { status: 'REPLY_SENT', lastMessageAt: new Date() },
+      });
+      await logActivity({
+        type: 'conversation.reply_sent',
+        entityType: 'conversation', entityId: conversationId,
+        companyId: conversation.companyId,
+      });
+      return { success: true };
+    } catch (error) {
+      // Never silently send a second copy over a different provider.
+      await logActivity({
+        type: 'conversation.reply_send_needs_reconciliation',
+        entityType: 'conversation', entityId: conversationId,
+        companyId: conversation.companyId,
+        meta: { messageId, detail: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
     }
-
-    // Mark draft as sent
-    await prisma.conversationMessage.update({
-      where: { id: messageId },
-      data: {
-        body: bodyToSend,
-        approvedAt: new Date(),
-        sentAt: new Date(),
-        gmailMessageId: gmailResult?.gmailMessageId ?? null,
-      },
-    });
-
-    // Create a permanent outbound record
-    await prisma.conversationMessage.create({
-      data: {
-        conversationId,
-        direction: 'OUTBOUND',
-        subject: draft.subject ?? `Re: ${conversation.email.subject}`,
-        body: bodyToSend,
-        toEmail: contact.email,
-        sentAt: new Date(),
-        gmailMessageId: gmailResult?.gmailMessageId ?? null,
-      },
-    });
-
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { status: 'REPLY_SENT', lastMessageAt: new Date() },
-    });
-
-    await logActivity({
-      type: 'conversation.reply_sent',
-      entityType: 'conversation',
-      entityId: conversationId,
-      companyId: conversation.companyId,
-    });
-
-    return { success: true };
   }
 
   async discardDraft(conversationId: string, messageId: string) {
