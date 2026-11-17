@@ -55,7 +55,7 @@ export function publicCompanyDomain(url: string): string | null {
 const METAL_CONTEXT = /\b(?:steel|sheet[\s-]?metal|metal[\s-]?(?:fabricat\w*|process\w*|work\w*)|laser[\s-]?cut\w*|cnc|machin\w*|weld\w*|stainless|alumini?um|offcuts?|remnants?|coil[\s-]?slitt\w*|rebar)\b/i;
 const SOFTWARE_SELECTION = /\b(?:erp|mrp|inventory|production|warehouse|shop[\s-]?floor)\s+(?:software|system|platform)\b[\s\S]{0,100}\b(?:select|evaluat|replac|implement|migrat|roll[\s-]?out|procure|rfp|tender|develop|build|seek|search)/i;
 const SELECTION_REVERSE = /\b(?:select|evaluat|replac|implement|migrat|roll[\s-]?out|procure|rfp|tender|develop|build|seek|search)[\s\S]{0,100}\b(?:erp|mrp|inventory|production|warehouse)\s+(?:software|system|platform)\b/i;
-const OPERATIONAL_PAIN = /\b(?:spreadsheets?|excel|manual(?:ly)?|paper[\s-]?based|stock[\s-]?(?:discrepan|variance|reconcil)|inventory[\s-]?(?:discrepan|variance|reconcil)|offcuts?|remnants?|material[\s-]?(?:shortage|traceab)|heat[\s-]?number|job[\s-]?cost|work[\s-]?in[\s-]?progress|production[\s-]?(?:delay|bottleneck)|quot(?:ation|ing)[\s-]?(?:delay|register)|duplicate[\s-]?entry)\b/i;
+const OPERATIONAL_PAIN = /\b(?:spreadsheets?|excel|manual(?:ly)?|paper[\s-]?based|(?:stock|inventory)[\s-]?(?:discrepan\w*|varianc\w*|reconcil\w*)|offcuts?|remnants?|material[\s-]?(?:shortag\w*|traceab\w*)|heat[\s-]?number\w*|job[\s-]?cost\w*|work[\s-]?in[\s-]?progress|production[\s-]?(?:delay\w*|bottleneck\w*)|quot(?:ation|ing)[\s-]?(?:delay\w*|register\w*)|duplicat\w*[\s-]?entr\w*)\b/i;
 
 export function qualifyErpEvidence(
   source: ErpSourceEvidence,
