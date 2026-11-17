@@ -284,36 +284,37 @@ export class ConversationService {
   }
 
   async pollGmail() {
-    const lastPollSetting = await prisma.setting.findUnique({ where: { key: 'gmailLastPollAt' } });
-    const lastPollAt = lastPollSetting?.value
-      ? new Date(lastPollSetting.value as string)
-      : new Date(Date.now() - 24 * 60 * 60 * 1000); // default: 24 hours ago
-
-    const newReplies = await this.gmail.fetchNewReplies(lastPollAt);
-
+    const last = await prisma.setting.findUnique({ where: { key: 'gmailLastPollAt' } });
+    const { since, checkpoint } = inboxPollWindow(last?.value, new Date());
+    const replies = await this.gmail.fetchNewReplies(since);
     const results: { conversationId: string; gmailMessageId: string; intent: string; draftReady: boolean }[] = [];
+    let failures = 0;
 
-    for (const reply of newReplies) {
+    for (const reply of replies) {
       try {
-        const result = await this.processOneReply(reply);
-        if (result) results.push(result);
-      } catch (err) {
-        console.error('Reply processing failed:', err);
+        const processed = await this.processOneReply(reply);
+        if (processed) results.push(processed);
+      } catch (error) {
+        failures++;
+        console.error('Gmail reply processing failed:', error);
       }
     }
-
+    // Retain checkpoint after partial failures. 10-minute overlap plus message-id
+    // deduplication allows safe retry even if a teammate already read the email.
+    if (failures) {
+      throw new AppError('Gmail poll had processing failures; checkpoint retained', 503);
+    }
     await prisma.setting.upsert({
       where: { key: 'gmailLastPollAt' },
-      update: { value: new Date().toISOString() },
-      create: { key: 'gmailLastPollAt', value: new Date().toISOString() },
+      update: { value: checkpoint.toISOString() },
+      create: { key: 'gmailLastPollAt', value: checkpoint.toISOString() },
     });
-
-    return { fetched: newReplies.length, processed: results.length, results };
+    return { fetched: replies.length, processed: results.length, results };
   }
 
   private async processOneReply(reply: {
     id: string; threadId: string; subject: string; from: string; to: string;
-    body: string; receivedAt: Date; inReplyTo?: string;
+    body: string; receivedAt: Date; inReplyTo?: string; rfcMessageId?: string;
   }) {
     // Match conversation by threadId first, then by contact email
     let conversation = await prisma.conversation.findFirst({
@@ -342,7 +343,7 @@ export class ConversationService {
       }
     }
 
-    if (!conversation) return null;
+    if (!conversation || conversation.status === 'SUPPRESSED') return null;
 
     // Skip duplicates
     const existing = await prisma.conversationMessage.findFirst({ where: { gmailMessageId: reply.id } });
@@ -377,6 +378,7 @@ export class ConversationService {
         fromEmail: reply.from,
         toEmail: reply.to,
         gmailMessageId: reply.id,
+        rfcMessageId: reply.rfcMessageId,
         intent,
         intentDetails: intentDetails as unknown as Prisma.InputJsonValue,
       },
@@ -499,9 +501,17 @@ export class ConversationService {
   }
 
   async suppress(conversationId: string, reason: string) {
+    const conversation = await this.getById(conversationId);
     await prisma.conversation.update({
       where: { id: conversationId },
       data: { status: 'SUPPRESSED', suppressedAt: new Date(), followUpNote: reason },
+    });
+    await logActivity({
+      type: 'conversation.suppressed',
+      entityType: 'conversation',
+      entityId: conversationId,
+      companyId: conversation.companyId,
+      meta: { reason, manuallySuppressed: true },
     });
     return { success: true };
   }
