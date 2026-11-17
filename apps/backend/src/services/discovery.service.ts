@@ -124,6 +124,55 @@ export class DiscoveryService {
     }));
   }
 
+  /**
+   * Explicit first-party verification by an authenticated teammate.
+   * Do not mistake an LLM score or search snippet for verified buying intent.
+   */
+  async reviewErpEvidence(input: {
+    companyId: string;
+    reviewerId: string;
+    sourceUrl: string;
+    evidenceText: string;
+    observedAt: string;
+    signalType: 'software_selection' | 'operational_pain';
+    vendorAlreadySelected: boolean;
+  }) {
+    const company = await prisma.company.findUnique({ where: { id: input.companyId } });
+    if (!company || company.serviceMode !== 'ERP') {
+      throw new AppError('ERP company not found', 404);
+    }
+    const companyDomain = company.website ? publicCompanyDomain(company.website) : null;
+    if (!companyDomain || publicCompanyDomain(input.sourceUrl) !== companyDomain) {
+      throw new AppError('Review requires a URL hosted on the verified company website.', 400);
+    }
+    const observed = new Date(input.observedAt);
+    if (Number.isNaN(observed.getTime()) || observed.getTime() > Date.now() ||
+      observed.getTime() < Date.now() - 365 * 86_400_000) {
+      throw new AppError('Evidence date must be valid and within the last 365 days.', 400);
+    }
+    if (input.vendorAlreadySelected) {
+      throw new AppError('An already-committed software project cannot be verified as an open ERP opportunity.', 400);
+    }
+
+    await logActivity({
+      type: 'prospect.evidence_reviewed',
+      entityType: 'company',
+      entityId: company.id,
+      companyId: company.id,
+      userId: input.reviewerId,
+      meta: {
+        sourceUrl: input.sourceUrl,
+        evidenceText: input.evidenceText,
+        observedAt: observed.toISOString(),
+        signalType: input.signalType,
+        vendorAlreadySelected: false,
+        reviewStatus: 'approved_for_research',
+      },
+    });
+
+    return { companyId: company.id, reviewStatus: 'approved_for_research' };
+  }
+
   async scrapeContacts(websiteUrl: string, companyName: string): Promise<ExtractedContact[]> {
     return (await this.scrapeContactsWithStatus(websiteUrl, companyName)).contacts;
   }
