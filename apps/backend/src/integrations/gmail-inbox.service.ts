@@ -40,56 +40,52 @@ export class GmailInboxService {
   }
 
   /**
-   * Fetch unread messages in inbox received since a given timestamp.
-   * Returns messages that look like replies (have In-Reply-To header).
+   * Fetch incoming replies since a checkpoint with pagination.
+   * A search/index error must propagate so the caller does not advance the
+   * checkpoint past replies that were not processed.
+   *
+   * Do not require unread: a teammate may read a reply before Hermes polls.
+   * Persisted Gmail message IDs make overlap/replays safe.
    */
   async fetchNewReplies(sinceTimestamp: Date): Promise<GmailMessage[]> {
     if (!this.isConfigured) {
-      logger.warn('GmailInboxService: Gmail OAuth not configured — skipping inbox poll');
-      return [];
+      throw new Error('Gmail OAuth credentials are not configured; inbox checkpoint was not advanced');
     }
 
-    try {
-      const auth = this.getOAuth2Client();
-      const gmail = google.gmail({ version: 'v1', auth });
+    const auth = this.getOAuth2Client();
+    const gmail = google.gmail({ version: 'v1', auth });
+    const sinceUnix = Math.floor(sinceTimestamp.getTime() / 1000);
+    const query = 'in:inbox after:' + sinceUnix;
 
-      const sinceUnix = Math.floor(sinceTimestamp.getTime() / 1000);
-      const query = `is:unread in:inbox after:${sinceUnix}`;
+    let pageToken: string | undefined;
+    const messages: GmailMessage[] = [];
+    const seen = new Set<string>();
+    let pageCount = 0;
 
+    do {
       const listRes = await gmail.users.messages.list({
-        userId: 'me',
-        q: query,
-        maxResults: 50,
+        userId: 'me', q: query, maxResults: 100, pageToken,
       });
-
-      const messageIds = listRes.data.messages ?? [];
-      if (messageIds.length === 0) return [];
-
-      const messages: GmailMessage[] = [];
-
-      for (const { id } of messageIds) {
-        if (!id) continue;
-        try {
-          const msg = await gmail.users.messages.get({
-            userId: 'me',
-            id,
-            format: 'full',
-          });
-
-          const parsed = this.parseMessage(msg.data);
-          if (parsed && parsed.inReplyTo) {
-            messages.push(parsed);
-          }
-        } catch (err) {
-          logger.error('GmailInboxService: Failed to fetch message', { id, error: err });
+      pageCount++;
+      for (const item of listRes.data.messages ?? []) {
+        if (!item.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        // Fail closed rather than silently lose a message in the batch.
+        const response = await gmail.users.messages.get({
+          userId: 'me', id: item.id, format: 'full',
+        });
+        const parsed = this.parseMessage(response.data);
+        if (parsed && (parsed.inReplyTo || parsed.references?.length)) {
+          messages.push(parsed);
         }
       }
+      pageToken = listRes.data.nextPageToken ?? undefined;
+      if (pageToken && pageCount >= 5) {
+        throw new Error('Inbox poll reached the 500-message safety cap; checkpoint retained for retry');
+      }
+    } while (pageToken);
 
-      return messages;
-    } catch (err) {
-      logger.error('GmailInboxService: fetchNewReplies error', { error: err });
-      return [];
-    }
+    return messages.sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime());
   }
 
   /**
