@@ -19,6 +19,8 @@ export interface OrchestrationInput {
   clearbitData?: CompanyResearchInput['clearbitData'];
   autoApprove?: boolean;
   maxRetries?: number;
+  existingResearch?: ResearchData;
+  verifiedEvidence?: { sourceUrl: string; evidenceText: string; signalType: 'software_selection' | 'operational_pain' };
 }
 
 export interface OrchestrationResult {
@@ -45,18 +47,21 @@ export class HermesOrchestrator {
     const maxRetries = input.maxRetries ?? 3;
     let totalTokensUsed = 0;
 
-    // Step 1: Company Research
-    const researchResult = await this.researchAgent.run({
-      companyName: input.companyName,
-      website: input.website,
-      industry: input.industry,
-      country: input.country,
-      serpResults: input.serpResults,
-      clearbitData: input.clearbitData,
-    });
+    // Reuse persisted research where available. Do not invent a new "research"
+    // result merely by re-prompting the model during email generation.
+    const researchResult = input.existingResearch
+      ? { success: true as const, data: input.existingResearch, tokensUsed: 0 }
+      : await this.researchAgent.run({
+          companyName: input.companyName,
+          website: input.website,
+          industry: input.industry,
+          country: input.country,
+          serpResults: input.serpResults,
+          clearbitData: input.clearbitData,
+        });
 
     if (!researchResult.success || !researchResult.data) {
-      return { success: false, error: `Research failed: ${researchResult.error}` };
+      return { success: false, error: 'Research failed' };
     }
     totalTokensUsed += researchResult.tokensUsed ?? 0;
     const research = researchResult.data;
@@ -96,6 +101,7 @@ export class HermesOrchestrator {
         emailAngle: painPoints.emailAngle,
         tone: input.tone,
         previousVersions,
+        verifiedEvidence: input.verifiedEvidence,
       });
 
       if (!emailResult.success || !emailResult.data) continue;
