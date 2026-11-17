@@ -1,11 +1,8 @@
 import { Worker, type Job } from 'bullmq';
 import { getBullMQConnection } from '../config/redis.js';
 import { logger } from '../config/logger.js';
-import { prisma } from '@hermes/database';
-import { ProspectFinderAgent } from '@hermes/agents';
-import { ApolloService } from '../integrations/apollo.service.js';
+import { DiscoveryService } from '../services/discovery.service.js';
 import { QUEUE_NAMES } from '../queues/index.js';
-import { logActivity } from '../services/activity.service.js';
 
 interface DiscoveryJobData {
   industries?: string[];
@@ -14,87 +11,54 @@ interface DiscoveryJobData {
 }
 
 export function startProspectDiscoveryWorker(): Worker {
-  const finder = new ProspectFinderAgent();
-  const apollo = new ApolloService();
+  const discovery = new DiscoveryService();
 
   const worker = new Worker<DiscoveryJobData>(
     QUEUE_NAMES.PROSPECT_DISCOVERY,
     async (job: Job<DiscoveryJobData>) => {
       const {
-        industries = ['Electronics', 'Packaging', 'Plastics'],
-        countries = ['USA', 'UK'],
-        limit = 10,
+        industries = ['Sheet metal fabrication', 'Steel service center', 'Laser cutting'],
+        countries = ['USA', 'UK', 'Australia', 'UAE'],
+        limit = 20,
       } = job.data;
 
-      logger.info('Prospect discovery job started', { industries, countries, limit });
+      let imported = 0;
+      let reviewedCandidates = 0;
+      let failedSearches = 0;
+      const perMarket = Math.max(1, Math.ceil(limit / Math.max(1, industries.length * countries.length)));
 
-      // Get existing companies to avoid duplicates
-      const existing = await prisma.company.findMany({
-        select: { name: true },
-        take: 500,
-      });
-      const existingNames = existing.map((c) => c.name);
-
-      let totalCreated = 0;
-
+      // One live, source-backed search per sector/market — no LLM-memory recall.
       for (const industry of industries) {
         for (const country of countries) {
-          const result = await finder.run({
-            industry,
-            country,
-            limit: Math.ceil(limit / (industries.length * countries.length)),
-            existingCompanies: existingNames,
-          });
-
-          if (!result.success || !result.data) continue;
-
-          for (const candidate of result.data) {
-            // Skip if already exists
-            if (existingNames.some((n) => n.toLowerCase() === candidate.companyName.toLowerCase())) continue;
-
-            const company = await prisma.company.create({
-              data: {
-                name: candidate.companyName,
-                website: candidate.website,
-                industry: candidate.industry,
-                country: candidate.country,
-                employeeCount: candidate.estimatedEmployees,
-                source: 'ai-discovery',
-                status: 'NEW',
-              },
+          try {
+            const results = await discovery.search({ industry, country, limit: perMarket });
+            reviewedCandidates += results.length;
+            if (!results.length) continue;
+            const saved = await discovery.importCompanies(results, {
+              autoResearch: true,
+              autoEmail: false, // An unreviewed search excerpt must never trigger outreach.
+              serviceMode: 'ERP',
             });
-
-            existingNames.push(company.name);
-            totalCreated++;
-
-            await logActivity({
-              type: 'prospect.created',
-              entityType: 'company',
-              entityId: company.id,
-              companyId: company.id,
-              meta: { confidence: candidate.confidence, source: 'ai-discovery' },
+            imported += saved.imported;
+          } catch (error) {
+            failedSearches++;
+            logger.warn('ERP discovery market failed', {
+              industry,
+              country,
+              message: error instanceof Error ? error.message : String(error),
             });
-
-            // Auto-queue research for high-confidence candidates
-            if (candidate.confidence >= 0.8) {
-              const researchQueue = (await import('../queues/index.js')).getQueue(QUEUE_NAMES.RESEARCH);
-              await researchQueue.add('research', { companyId: company.id }, { priority: 2, delay: 5000 });
-            }
           }
         }
       }
 
-      logger.info('Prospect discovery complete', { totalCreated });
+      if (failedSearches === industries.length * countries.length) {
+        throw new Error('All ERP discovery markets failed; check SerpAPI credentials and search provider.');
+      }
+      logger.info('Evidence-first ERP discovery complete', { jobId: job.id, reviewedCandidates, imported, failedSearches });
     },
-    {
-      connection: getBullMQConnection(),
-      concurrency: 1, // One discovery run at a time
-    },
+    { connection: getBullMQConnection(), concurrency: 1 },
   );
 
-  worker.on('failed', (job, err) => {
-    logger.error('Prospect discovery job failed', { jobId: job?.id, error: err.message });
-  });
-
+  worker.on('failed', (job, err) => logger.error('Prospect discovery job failed', { jobId: job?.id, error: err.message }));
   return worker;
 }

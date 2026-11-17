@@ -5,6 +5,9 @@ import type { Prisma } from '@hermes/database';
 import { logger } from '../config/logger.js';
 import { GmailInboxService } from '../integrations/gmail-inbox.service.js';
 import { logActivity } from '../services/activity.service.js';
+import { prepareScheduledFollowUp } from '../services/follow-up.service.js';
+import { inboxPollWindow } from './reply-poll-policy.js';
+import { explicitContactStop } from '../services/reply-safety.policy.js';
 
 export interface ReplyProcessingJobData {
   conversationId?: string;
@@ -32,34 +35,47 @@ export function createReplyProcessingWorker(): Worker {
   const worker = new Worker<ReplyProcessingJobData, ProcessedReply[]>(
     'reply-processing',
     async (job: Job<ReplyProcessingJobData>) => {
-      logger.info('Reply processing job started', { jobId: job.id });
+      logger.info('Reply processing job started', { jobId: job.id, jobName: job.name });
       const results: ProcessedReply[] = [];
+
+      // Scheduled follow-ups are not Gmail inbox polls.
+      if (job.name === 'follow-up-due') {
+        if (!job.data.conversationId) throw new Error('Missing conversationId on follow-up job');
+        await prepareScheduledFollowUp(job.data.conversationId);
+        return results;
+      }
+      if (job.name !== 'gmail-poll') {
+        throw new Error('Unknown reply-processing job: ' + job.name);
+      }
 
       const gmail = new GmailInboxService();
 
       // Find the last time we polled Gmail
       const lastPollSetting = await prisma.setting.findUnique({ where: { key: 'gmailLastPollAt' } });
-      const lastPollAt = lastPollSetting?.value
-        ? new Date(lastPollSetting.value as string)
-        : new Date(Date.now() - 60 * 60 * 1000); // default: 1 hour ago
-
-      const newReplies = await gmail.fetchNewReplies(lastPollAt);
+      const pollStartedAt = new Date();
+      const { since, checkpoint } = inboxPollWindow(lastPollSetting?.value, pollStartedAt);
+      const newReplies = await gmail.fetchNewReplies(since);
       logger.info('Gmail replies fetched', { count: newReplies.length });
 
+      let failedMessages = 0;
       for (const reply of newReplies) {
         try {
           const result = await processOneReply(reply, gmail);
           if (result) results.push(result);
         } catch (err) {
+          failedMessages++;
           logger.error('Reply processing failed for message', { gmailId: reply.id, error: err });
         }
       }
 
-      // Update last poll timestamp
+      // Fail closed: never advance past messages that failed to process.
+      if (failedMessages) {
+        throw new Error('Inbox poll had ' + failedMessages + ' processing failures; checkpoint retained');
+      }
       await prisma.setting.upsert({
         where: { key: 'gmailLastPollAt' },
-        update: { value: new Date().toISOString() },
-        create: { key: 'gmailLastPollAt', value: new Date().toISOString() },
+        update: { value: checkpoint.toISOString() },
+        create: { key: 'gmailLastPollAt', value: checkpoint.toISOString() },
       });
 
       logger.info('Reply processing complete', { processed: results.length });
@@ -84,7 +100,7 @@ export function createReplyProcessingWorker(): Worker {
 }
 
 async function processOneReply(
-  reply: { id: string; threadId: string; subject: string; from: string; to: string; body: string; receivedAt: Date; inReplyTo?: string },
+  reply: { id: string; threadId: string; subject: string; from: string; to: string; body: string; receivedAt: Date; inReplyTo?: string; rfcMessageId?: string },
   gmail: GmailInboxService,
 ): Promise<ProcessedReply | null> {
   // 1. Find matching conversation by threadId or by matching the from-email to a sent email contact
@@ -136,6 +152,11 @@ async function processOneReply(
     return null;
   }
 
+  if (conversation.status === 'SUPPRESSED') {
+    logger.info('Ignored reply from suppressed company', { conversationId: conversation.id });
+    return null;
+  }
+
   // 2. Check for duplicate (already stored this gmailMessageId)
   const existing = await prisma.conversationMessage.findFirst({
     where: { gmailMessageId: reply.id },
@@ -155,7 +176,12 @@ async function processOneReply(
     body: m.body,
   }));
 
-  const intentResult = await intentAgent.run({
+  const hardStop = explicitContactStop(reply.body);
+  const intentResult = hardStop ? { data: {
+    intent: hardStop, confidence: 1,
+    summary: 'Prospect explicitly requested no further contact.',
+    suggestedAction: 'Suppress this company and stop all outreach.',
+  } } : await intentAgent.run({
     inboundEmailBody: reply.body,
     conversationContext: {
       companyName: originalEmail.company.name,
@@ -184,6 +210,7 @@ async function processOneReply(
       fromEmail: reply.from,
       toEmail: reply.to,
       gmailMessageId: reply.id,
+      rfcMessageId: reply.rfcMessageId,
       intent,
       intentDetails: intentDetails as unknown as Prisma.InputJsonValue,
     },
@@ -223,14 +250,20 @@ async function processOneReply(
   }
 
   // 6. Handle NOT_NOW — schedule follow-up
-  if (intent === 'NOT_NOW' && intentDetails.followUpAt) {
+  const followUpAt = 'followUpAt' in intentDetails ? intentDetails.followUpAt : undefined;
+  const followUpTime = typeof followUpAt === 'string'
+    ? new Date(followUpAt) : null;
+  if (intent === 'NOT_NOW' && followUpTime &&
+    !Number.isNaN(followUpTime.getTime()) &&
+    followUpTime > new Date() &&
+    followUpTime < new Date(Date.now() + 365 * 86_400_000)) {
     await prisma.conversation.update({
       where: { id: conversation.id },
       data: {
         status: 'FOLLOW_UP_SCHEDULED',
         intent,
         lastMessageAt: reply.receivedAt,
-        followUpAt: new Date(intentDetails.followUpAt),
+        followUpAt: followUpTime,
         followUpNote: intentDetails.summary,
       },
     });
@@ -239,7 +272,7 @@ async function processOneReply(
       entityType: 'conversation',
       entityId: conversation.id,
       companyId: conversation.companyId,
-      meta: { followUpAt: intentDetails.followUpAt, reason: intentDetails.summary },
+      meta: { followUpAt: followUpTime.toISOString(), reason: intentDetails.summary },
     });
     await gmail.markAsRead(reply.id);
     return { conversationId: conversation.id, gmailMessageId: reply.id, intent, draftReady: false };
@@ -280,6 +313,7 @@ async function processOneReply(
       fromEmail: reply.from,
       toEmail: reply.to,
       gmailMessageId: reply.id,
+      rfcMessageId: reply.rfcMessageId ?? null,
       intent,
       intentDetails: null,
       draftBody: null,

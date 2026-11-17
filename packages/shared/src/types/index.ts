@@ -18,6 +18,7 @@ export type EmailStatus =
   | 'draft'
   | 'pending_approval'
   | 'approved'
+  | 'sending'
   | 'sent'
   | 'skipped';
 
@@ -161,6 +162,8 @@ export interface ConversationContext {
   thread: Array<{ direction: 'outbound' | 'inbound'; body: string; sentAt: string }>;
   researchSummary: string;
   primaryOpportunity?: string;
+  draftPurpose?: 'inbound_reply' | 'scheduled_follow_up';
+  followUpReason?: string;
   intent: ReplyIntent;
   intentDetails: ReplyIntentResult;
 }

@@ -10,6 +10,8 @@ export interface SendEmailOptions {
   from?: string;
   replyTo?: string;
   messageId?: string;
+  inReplyTo?: string;
+  references?: string;
 }
 
 export interface SendEmailResult {
@@ -51,6 +53,8 @@ export class EmailSenderService {
       html: options.html,
       text: options.text ?? options.html.replace(/<[^>]*>/g, ''),
       replyTo: options.replyTo,
+      inReplyTo: options.inReplyTo,
+      references: options.references,
     });
 
     logger.info('Email sent', { to: options.to, subject: options.subject, messageId: info.messageId });

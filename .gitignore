@@ -53,3 +53,7 @@ packages/database/generated/
 
 # Redis dumps
 dump.rdb
+
+# Local pilot search settings and generated research
+.pilot-searxng/
+pilot-results/

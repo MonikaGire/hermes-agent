@@ -1,0 +1,50 @@
+name: ERP evidence safeguards
+
+on:
+  pull_request:
+    paths:
+      - 'packages/agents/**'
+      - 'packages/shared/**'
+      - 'apps/backend/**'
+      - 'tests/**'
+      - 'scripts/metal-pilot.mjs'
+      - 'PILOT.ps1'
+      - '.github/workflows/erp-evidence.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: erp-evidence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Evidence-first prospect qualification tests
+        run: node --experimental-strip-types --test tests/*.test.mjs
+      - name: Windows pilot script syntax and offline self-check
+        run: |
+          node --check scripts/metal-pilot.mjs
+          node scripts/metal-pilot.mjs --self-test
+          node scripts/metal-pilot.mjs --self-test-auth
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run typecheck --workspace=packages/shared
+      - run: npm run build --workspace=packages/shared
+      - run: npm run typecheck --workspace=packages/agents
+      - run: npx tsc -p packages/agents/tsconfig.json
+      - run: npm run build --workspace=packages/database
+      - run: npm run typecheck --workspace=apps/backend

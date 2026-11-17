@@ -3,6 +3,9 @@ import type { Prisma, EmailStatus } from '@hermes/database';
 import { AppError } from '../utils/AppError.js';
 import { logActivity } from './activity.service.js';
 import { EmailSenderService } from '../integrations/email-sender.service.js';
+import { assertErpOutreachEligible } from './erp-quality.service.js';
+import { assertCompanyNotSuppressed } from './suppression.service.js';
+import { plainTextToSafeHtml } from '../utils/email-content.js';
 import type { GenerateEmailDto, UpdateEmailDto } from '../validators/email.validator.js';
 import type { ReviewScores } from '@hermes/shared';
 
@@ -48,7 +51,7 @@ export class EmailService {
     const company = await prisma.company.findUnique({
       where: { id: dto.companyId },
       include: {
-        contacts: { take: 1 },
+        contacts: { take: 20, orderBy: { createdAt: 'desc' } },
         research: { orderBy: { createdAt: 'desc' }, take: 1 },
         aeoResearch: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
@@ -56,10 +59,14 @@ export class EmailService {
 
     if (!company) throw new AppError('Company not found', 404);
 
-    const contact = company.contacts[0];
-    if (!contact) throw new AppError('No contacts found. Add a contact first.', 400);
-
     const serviceMode = company.serviceMode ?? 'ERP';
+    const contact = serviceMode === 'ERP'
+      ? company.contacts.find((item) => item.email && item.isVerified)
+      : company.contacts[0];
+    if (!contact) throw new AppError('A verified business contact is required for ERP email drafting.', 400);
+    const reviewedEvidence = serviceMode === 'ERP'
+      ? await assertErpOutreachEligible(company.id, contact)
+      : undefined;
 
     let email: { subject: string; body: string; wordCount: number; reviewScores: unknown };
     let approvalStatus: string;
@@ -153,6 +160,19 @@ export class EmailService {
         contactName: `${contact.firstName} ${contact.lastName}`,
         contactRole: contact.role,
         tone: dto.tone,
+        verifiedEvidence: reviewedEvidence,
+        existingResearch: {
+          products: research.products,
+          locations: research.locations,
+          recentNews: research.recentNews as unknown as string[],
+          expansionPlans: research.expansionPlans,
+          hiringActivity: research.hiringActivity,
+          techStack: research.techStack,
+          investments: research.investments,
+          acquisitions: research.acquisitions,
+          painPoints: [],
+          summary: research.summary,
+        },
       });
 
       if (!result.success || !result.data) {
@@ -170,7 +190,7 @@ export class EmailService {
         body: email.body,
         wordCount: email.wordCount,
         reviewScores: email.reviewScores as unknown as Prisma.InputJsonValue,
-        status: approvalStatus === 'approved' ? 'APPROVED' : 'PENDING_APPROVAL',
+        status: 'PENDING_APPROVAL', // Human review required until live campaign is qualified.
         serviceMode: serviceMode as 'ERP' | 'AEO' | 'SEO',
         tone: dto.tone ?? 'professional',
       },
@@ -193,12 +213,33 @@ export class EmailService {
       throw new AppError('Contact email address is required', 400);
     }
 
-    const result = await this.sender.send({
-      to: email.contact.email,
-      subject: email.subject,
-      html: email.body.replace(/\n/g, '<br>'),
-      text: email.body,
+    await assertCompanyNotSuppressed(email.companyId);
+    if (email.serviceMode === 'ERP') {
+      await assertErpOutreachEligible(email.companyId, email.contact);
+    }
+
+    const claim = await prisma.email.updateMany({
+      where: { id, status: 'APPROVED' }, data: { status: 'SENDING' },
     });
+    if (claim.count !== 1) throw new AppError('Email is already sending or was sent', 409);
+
+    let result: Awaited<ReturnType<EmailSenderService['send']>>;
+    try {
+      result = await this.sender.send({
+        to: email.contact.email,
+        subject: email.subject,
+        html: plainTextToSafeHtml(email.body),
+        text: email.body,
+      });
+    } catch (error) {
+      // Do not re-send automatically: provider may have delivered on timeout.
+      await logActivity({
+        type: 'email.send_needs_reconciliation',
+        entityType: 'email', entityId: id, companyId: email.companyId,
+        meta: { error: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
+    }
 
     const updated = await prisma.email.update({
       where: { id },
@@ -241,7 +282,7 @@ export class EmailService {
 
   async regenerate(id: string) {
     const email = await this.getById(id);
-    if (email.status === 'SENT') throw new AppError('Cannot regenerate a sent email', 400);
+    if (email.status === 'SENT' || email.status === 'SENDING') throw new AppError('Cannot regenerate a sent or sending email', 400);
 
     const dto: GenerateEmailDto = { companyId: email.companyId, tone: (email.tone as 'professional' | 'casual' | 'direct' | null) ?? 'professional' };
     const newEmail = await this.generate(dto);
@@ -253,13 +294,21 @@ export class EmailService {
   }
 
   async update(id: string, dto: UpdateEmailDto) {
-    await this.getById(id);
-    return prisma.email.update({ where: { id }, data: dto as Prisma.EmailUpdateInput });
+    const email = await this.getById(id);
+    if (email.status === 'SENT' || email.status === 'SENDING') {
+      throw new AppError('Cannot modify a sent or sending email', 400);
+    }
+    if (dto.status) {
+      throw new AppError('Email status must be changed through the approval workflow, not PATCH', 400);
+    }
+    return prisma.email.update({
+      where: { id }, data: { subject: dto.subject, body: dto.body },
+    });
   }
 
   async remove(id: string) {
     const email = await this.getById(id);
-    if (email.status === 'SENT') throw new AppError('Cannot delete a sent email', 400);
+    if (email.status === 'SENT' || email.status === 'SENDING') throw new AppError('Cannot delete a sent or sending email', 400);
     await prisma.email.delete({ where: { id } });
   }
 }

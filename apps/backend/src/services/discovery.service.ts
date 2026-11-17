@@ -4,7 +4,7 @@ import { getQueue, QUEUE_NAMES } from '../queues/index.js';
 import { logActivity } from './activity.service.js';
 import { logger } from '../config/logger.js';
 import { SerpApiService } from '../integrations/serpapi.service.js';
-import { ProspectFinderAgent } from '@hermes/agents';
+import { ProspectFinderAgent, publicCompanyDomain } from '@hermes/agents';
 
 export interface DiscoveredCompany {
   companyName: string;
@@ -17,6 +17,10 @@ export interface DiscoveredCompany {
   rationale: string;
   contacts: ExtractedContact[];
   source: 'google' | 'ai' | 'maps';
+  sourceUrl?: string;
+  sourcePublishedAt?: string;
+  signalType?: 'software_selection' | 'operational_pain';
+  verification?: 'search_excerpt';
 }
 
 export interface ExtractedContact {
@@ -46,76 +50,127 @@ export class DiscoveryService {
 
   async search(params: DiscoverySearchParams): Promise<DiscoveredCompany[]> {
     const key = await this.getSerpApiKey();
-    const hasSerpApi = !!(key && key !== 'your-serpapi-key');
-
-    if (hasSerpApi) {
-      return this.searchWithGoogle(params, key);
+    if (!key || key === 'your-serpapi-key') {
+      // Never substitute model memory for live prospect discovery.
+      throw new AppError('A live SerpAPI integration is required for evidence-based discovery. Configure it in Settings → Integrations.', 503);
     }
-    return this.searchWithAI(params);
+    return this.searchWithGoogle(params, key);
   }
 
   private async searchWithGoogle(params: DiscoverySearchParams, apiKey: string): Promise<DiscoveredCompany[]> {
     const serpApi = new SerpApiService(apiKey);
     const { industry, country, region, keywords, limit } = params;
-    const location = region ? `${region}, ${country}` : country;
-    const query = keywords
-      ? `${keywords} ${industry} manufacturing company ${location}`
-      : `${industry} manufacturing company ${location} site:linkedin.com OR site:clutch.co OR -site:amazon.com`;
+    const location = region ? region + ', ' + country : country;
+    // Search for the situation, not a directory of manufacturers.
+    const queries = keywords
+      ? [keywords + ' ' + industry + ' ' + location]
+      : [
+          industry + ' ' + location + ' "ERP" "implementation" factory',
+          industry + ' ' + location + ' "Excel" "inventory" manufacturing',
+          industry + ' ' + location + ' "stock reconciliation" production',
+          industry + ' ' + location + ' "job costing" "manual"',
+          industry + ' ' + location + ' "offcuts" "inventory"',
+        ];
 
-    const results = await serpApi.search(query, { num: Math.min(limit * 2, 20) });
-
-    const companies: DiscoveredCompany[] = [];
-    for (const r of results.slice(0, limit)) {
-      try {
-        const domain = r.link ? new URL(r.link).hostname.replace('www.', '') : '';
-        if (!domain || domain.includes('linkedin') || domain.includes('facebook')) continue;
-
-        const companyName = r.title.replace(/ [-|–].*/g, '').trim();
-        const contacts = await this.scrapeContacts(`https://${domain}`, companyName);
-
-        companies.push({
-          companyName,
-          website: `https://${domain}`,
-          industry,
-          country,
-          region,
-          confidence: 0.75,
-          rationale: r.snippet,
-          contacts,
-          source: 'google',
-        });
-      } catch {
-        // skip malformed results
-      }
-    }
-    return companies;
-  }
-
-  private async searchWithAI(params: DiscoverySearchParams): Promise<DiscoveredCompany[]> {
-    const { industry, country, region, keywords, limit } = params;
-
-    const result = await this.finderAgent.run({
-      industry,
-      country: region ? `${region}, ${country}` : country,
-      limit,
+    const batches = await Promise.allSettled(
+      queries.map((q) => serpApi.search(q, { num: Math.min(limit * 2, 20) })),
+    );
+    const evidence = batches.flatMap((batch) => {
+      if (batch.status !== 'fulfilled') return [];
+      return batch.value.flatMap((result) => {
+        const domain = publicCompanyDomain(result.link);
+        if (!domain) return [];
+        // A job board or industry listing is not the employer's official domain.
+        // Require the domain's brand to appear in a title segment before even considering it.
+        const brand = domain.split('.')[0]!.replace(/[^a-z0-9]/gi, '').toLowerCase();
+        if (brand.length < 4) return [];
+        const parts = result.title.split(/\s+[|–—-]\s+/).map((p) => p.trim());
+        const name = parts.find((p) => p.replace(/[^a-z0-9]/gi, '').toLowerCase().includes(brand));
+        if (!name || name.length < 3 || name.length > 130) return [];
+        return [{
+          companyName: name,
+          website: 'https://' + domain,
+          sourceUrl: result.link,
+          title: result.title,
+          excerpt: result.snippet,
+          ...(result.date ? { publishedAt: result.date } : {}),
+        }];
+      });
     });
 
-    if (!result.success || !result.data) {
-      logger.error('ProspectFinderAgent failed', { error: result.error });
+    const found = await this.finderAgent.run({
+      industry, country, limit, searchEvidence: evidence,
+    });
+    if (!found.success || !found.data) {
+      logger.warn('Evidence-first discovery returned no candidates', { reason: found.error });
       return [];
     }
 
-    const companies: DiscoveredCompany[] = [];
-    for (const c of result.data) {
-      const contacts = c.website ? await this.scrapeContacts(c.website, c.companyName) : [];
-      companies.push({
-        ...c,
-        region,
-        contacts,
-        source: 'ai',
-      });
+    // Candidates are REVIEW-ONLY; a search excerpt is not first-party verified intent.
+    return found.data.map((candidate) => ({
+      companyName: candidate.companyName,
+      website: candidate.website,
+      industry: candidate.industry,
+      country,
+      region,
+      confidence: candidate.confidence,
+      rationale: candidate.rationale,
+      contacts: [],
+      source: 'google' as const,
+      sourceUrl: candidate.sourceUrl,
+      sourcePublishedAt: candidate.sourcePublishedAt,
+      signalType: candidate.signalType,
+      verification: candidate.verification,
+    }));
+  }
+
+  /**
+   * Explicit first-party verification by an authenticated teammate.
+   * Do not mistake an LLM score or search snippet for verified buying intent.
+   */
+  async reviewErpEvidence(input: {
+    companyId: string;
+    reviewerId: string;
+    sourceUrl: string;
+    evidenceText: string;
+    observedAt: string;
+    signalType: 'software_selection' | 'operational_pain';
+    vendorAlreadySelected: boolean;
+  }) {
+    const company = await prisma.company.findUnique({ where: { id: input.companyId } });
+    if (!company || company.serviceMode !== 'ERP') {
+      throw new AppError('ERP company not found', 404);
     }
-    return companies;
+    const companyDomain = company.website ? publicCompanyDomain(company.website) : null;
+    if (!companyDomain || publicCompanyDomain(input.sourceUrl) !== companyDomain) {
+      throw new AppError('Review requires a URL hosted on the verified company website.', 400);
+    }
+    const observed = new Date(input.observedAt);
+    if (Number.isNaN(observed.getTime()) || observed.getTime() > Date.now() ||
+      observed.getTime() < Date.now() - 365 * 86_400_000) {
+      throw new AppError('Evidence date must be valid and within the last 365 days.', 400);
+    }
+    if (input.vendorAlreadySelected) {
+      throw new AppError('An already-committed software project cannot be verified as an open ERP opportunity.', 400);
+    }
+
+    await logActivity({
+      type: 'prospect.evidence_reviewed',
+      entityType: 'company',
+      entityId: company.id,
+      companyId: company.id,
+      userId: input.reviewerId,
+      meta: {
+        sourceUrl: input.sourceUrl,
+        evidenceText: input.evidenceText,
+        observedAt: observed.toISOString(),
+        signalType: input.signalType,
+        vendorAlreadySelected: false,
+        reviewStatus: 'approved_for_research',
+      },
+    });
+
+    return { companyId: company.id, reviewStatus: 'approved_for_research' };
   }
 
   async scrapeContacts(websiteUrl: string, companyName: string): Promise<ExtractedContact[]> {
@@ -199,14 +254,22 @@ export class DiscoveryService {
     companies: DiscoveredCompany[],
     options: { autoResearch: boolean; autoEmail: boolean; serviceMode?: 'ERP' | 'AEO' | 'SEO' },
   ) {
-    const existing = await prisma.company.findMany({ select: { name: true } });
-    const existingNames = new Set(existing.map((c) => c.name.toLowerCase()));
+    const existing = await prisma.company.findMany({ select: { name: true, website: true } });
+    const existingNames = new Set(existing.map((c) => c.name.trim().toLowerCase()));
+    const existingDomains = new Set(existing.map((c) => c.website ? publicCompanyDomain(c.website) : null).filter(Boolean));
 
     let imported = 0;
     let skipped = 0;
 
     for (const c of companies) {
-      if (existingNames.has(c.companyName.toLowerCase())) {
+      const companyDomain = c.website ? publicCompanyDomain(c.website) : null;
+      if (!companyDomain || existingDomains.has(companyDomain) || existingNames.has(c.companyName.trim().toLowerCase())) {
+        skipped++;
+        continue;
+      }
+      // For ERP discovery never import unsourced web results as qualified leads.
+      if ((options.serviceMode ?? 'ERP') === 'ERP' &&
+          c.source === 'google' && (!c.sourceUrl || !c.signalType)) {
         skipped++;
         continue;
       }
@@ -218,38 +281,51 @@ export class DiscoveryService {
           industry: c.industry,
           country: c.region ? `${c.region}, ${c.country}` : c.country,
           employeeCount: c.estimatedEmployees,
-          source: c.source === 'google' ? 'google-discovery' : c.source === 'maps' ? 'maps-discovery' : 'ai-discovery',
+          source: c.source === 'google' ? 'google-discovery-unverified' : c.source === 'maps' ? 'maps-discovery' : 'legacy-ai-discovery',
+          sourceId: c.sourceUrl,
           status: 'NEW',
           serviceMode: options.serviceMode ?? 'ERP',
         },
       });
 
-      existingNames.add(c.companyName.toLowerCase());
+      existingNames.add(c.companyName.trim().toLowerCase());
+      existingDomains.add(companyDomain);
 
-      // Create contacts from scraped data
-      const emails = c.contacts.filter((ct) => ct.type === 'email');
-      const phones = c.contacts.filter((ct) => ct.type === 'phone' || ct.type === 'whatsapp');
-
-      if (emails.length > 0) {
-        await prisma.contact.create({
-          data: {
-            companyId: company.id,
-            firstName: 'Contact',
-            lastName: c.companyName.split(' ')[0] ?? '',
-            role: 'Operations Manager',
-            email: emails[0]?.value,
-            phone: phones[0]?.value,
-          },
-        }).catch(() => { /* ignore contact creation errors */ });
-      }
-
+      // Website emails are generic routing addresses, not verified decision-makers.
+      // Keep them in evidence metadata; don't fabricate a named Operations Manager.
       await logActivity({
         type: 'prospect.created',
         entityType: 'company',
         entityId: company.id,
         companyId: company.id,
-        meta: { source: c.source, confidence: c.confidence, contacts: c.contacts.length },
+        meta: {
+          source: c.source,
+          confidence: c.confidence,
+          contactCandidates: c.contacts,
+          sourceUrl: c.sourceUrl ?? null,
+          sourcePublishedAt: c.sourcePublishedAt ?? null,
+          signalType: c.signalType ?? null,
+          verification: c.verification ?? 'unverified',
+          reviewStatus: 'needs_review',
+        },
       });
+
+      if (c.sourceUrl && c.signalType) {
+        await logActivity({
+          type: 'prospect.evidence',
+          entityType: 'company',
+          entityId: company.id,
+          companyId: company.id,
+          meta: {
+            sourceUrl: c.sourceUrl,
+            excerpt: c.rationale.slice(0, 600),
+            signalType: c.signalType,
+            publishedAt: c.sourcePublishedAt ?? null,
+            verification: c.verification ?? 'search_excerpt',
+            reviewed: false,
+          },
+        });
+      }
 
       if (options.autoResearch) {
         const researchQueue = getQueue(QUEUE_NAMES.RESEARCH);

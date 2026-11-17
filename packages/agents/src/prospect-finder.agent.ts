@@ -1,6 +1,11 @@
 import type { AgentResult } from '@hermes/shared';
 import { COMPANY_SIZE_MIN, COMPANY_SIZE_MAX } from '@hermes/shared';
 import { BaseAgent } from './base.agent.js';
+import {
+  qualifyErpEvidence,
+  type ErpSourceEvidence,
+  type ErpSignalType,
+} from './erp-evidence.js';
 
 export interface ProspectFinderInput {
   industry: string;
@@ -9,6 +14,8 @@ export interface ProspectFinderInput {
   companySizeMax?: number;
   limit?: number;
   existingCompanies?: string[];
+  /** Actual search-result evidence. Model training recall is NOT a source. */
+  searchEvidence?: ErpSourceEvidence[];
 }
 
 export interface ProspectCandidate {
@@ -19,74 +26,49 @@ export interface ProspectCandidate {
   estimatedEmployees?: number;
   confidence: number;
   rationale: string;
+  sourceUrl: string;
+  sourcePublishedAt?: string;
+  signalType: ErpSignalType;
+  verification: 'search_excerpt';
 }
 
-const SYSTEM_PROMPT = `You are a B2B prospect research specialist. Your task is to recall REAL, EXISTING manufacturing companies from your training knowledge.
-
-CRITICAL — READ CAREFULLY:
-- Only list companies that ACTUALLY EXIST in the real world
-- You must have encountered the company in real business data, industry directories, news, or company websites during training
-- The website must be the company's REAL official domain — never invent or guess a URL
-- Do NOT hallucinate or invent company names under any circumstances
-- If you are not confident a company is real and verifiable, omit it entirely
-- Prefer companies with a strong web presence (LinkedIn, Glassdoor, industry association membership)
-- Set confidence = 0.9+ only for companies you are very certain exist; 0.75–0.89 for companies you believe exist but are less sure about; never go below 0.75
-
-Target profile:
-- Industries: Electronics, Packaging, Plastics, Medical devices, Chemicals, Machinery, Food manufacturing
-- Countries: USA, UK, Australia, Singapore
-- Company size: 20–500 employees (mid-market manufacturers, NOT Fortune 500 or micro businesses)
-- Decision makers: CEO, COO, Operations Director, Manufacturing Director, IT Director
-
-EXCLUDE:
-- Fortune 500 / large multinationals (too big)
-- Government organizations
-- Non-manufacturing businesses (retail, SaaS, services, consulting)
-- Any company whose existence you cannot confirm with high confidence
-
-Real examples of the TYPE of mid-market manufacturers to find:
-- UFP Technologies (ufpt.com) — packaging, USA, ~2000 employees
-- Core Molding Technologies (coremt.com) — plastics, USA, ~600 employees
-- CML Microsystems (cmlmicro.com) — electronics, UK
-- Insteel Industries (insteel.com) — steel/machinery, USA
-- Roper Technologies divisions, Haynes Wire Company, Rogers Corporation
-
-Output valid JSON only. Wrap the array in an object: {"companies": [...]}`;
-
-
+/**
+ * Do not use LLM training recall to invent a lead list.
+ * Searches must be performed by the configured provider, then screened here.
+ *
+ * A search snippet alone cannot make a company "ready to buy". Every returned
+ * candidate is a REVIEW candidate until a person or first-party page confirms it.
+ */
 export class ProspectFinderAgent extends BaseAgent<ProspectFinderInput, ProspectCandidate[]> {
   protected readonly agentName = 'ProspectFinderAgent';
 
   async run(input: ProspectFinderInput): Promise<AgentResult<ProspectCandidate[]>> {
     return this.wrap(async () => {
-      const { content } = await this.chat(
-        SYSTEM_PROMPT,
-        `From your training knowledge, recall ${input.limit ?? 10} REAL, EXISTING manufacturing companies:
-- Industry: ${input.industry}
-- Country: ${input.country}
-- Size: ${input.companySizeMin ?? COMPANY_SIZE_MIN}–${input.companySizeMax ?? COMPANY_SIZE_MAX} employees
-${input.existingCompanies?.length ? `- Do NOT include these companies: ${input.existingCompanies.join(', ')}` : ''}
+      const seen = new Set((input.existingCompanies ?? []).map((n) => n.trim().toLowerCase()));
+      const candidates: ProspectCandidate[] = [];
 
-Remember: only list companies you are certain are real. If you cannot recall enough verified companies for this exact industry/country, return fewer results rather than inventing names.
+      for (const evidence of input.searchEvidence ?? []) {
+        const signal = qualifyErpEvidence(evidence);
+        if (!signal) continue;
+        const key = evidence.companyName.trim().toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
 
-Return JSON object with this exact format:
-{"companies": [{
-  "companyName": "Exact legal company name",
-  "website": "https://their-real-domain.com",
-  "industry": "${input.industry}",
-  "country": "${input.country}",
-  "estimatedEmployees": 150,
-  "confidence": 0.85,
-  "rationale": "Brief note on what this company makes and why it fits (include any real details you know)"
-}]}`,
-        { jsonMode: true, temperature: 0.2 },
-      );
-
-      const raw = this.parseJSON<unknown>(content);
-      const list: ProspectCandidate[] = Array.isArray(raw)
-        ? (raw as ProspectCandidate[])
-        : (Object.values(raw as Record<string, unknown>).find(Array.isArray) as ProspectCandidate[] ?? []);
-      return list.filter((p) => p.confidence >= 0.75);
+        candidates.push({
+          companyName: evidence.companyName.trim(),
+          website: new URL(evidence.website).origin,
+          industry: input.industry,
+          country: input.country,
+          confidence: signal.score / 100,
+          rationale: signal.evidenceExcerpt,
+          sourceUrl: signal.evidenceUrl,
+          sourcePublishedAt: signal.publishedAt,
+          signalType: signal.type,
+          verification: signal.verification,
+        });
+        if (candidates.length >= Math.min(input.limit ?? 10, 50)) break;
+      }
+      return candidates;
     });
   }
 }

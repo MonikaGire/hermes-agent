@@ -192,6 +192,7 @@ enum EmailStatus {
   DRAFT
   PENDING_APPROVAL
   APPROVED
+  SENDING
   SENT
   SKIPPED
 }
@@ -258,6 +259,8 @@ enum ConversationStatus {
   REPLY_SENT
   MEETING_BOOKED
   FOLLOW_UP_SCHEDULED
+  FOLLOW_UP_PREPARING
+  REPLY_SENDING
   SUPPRESSED
   CLOSED
 }
@@ -271,6 +274,7 @@ model ConversationMessage {
   fromEmail      String?
   toEmail        String?
   gmailMessageId String?
+  rfcMessageId   String?
   intent         String?
   intentDetails  Json?
   draftBody      String?

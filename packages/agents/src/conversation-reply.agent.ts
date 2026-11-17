@@ -1,57 +1,58 @@
 import type { AgentResult, ConversationReply, ConversationContext } from '@hermes/shared';
-import { T3_AEO_KNOWLEDGE, BANNED_PHRASES } from '@hermes/shared';
+import { T3_AEO_KNOWLEDGE, T3_SEO_KNOWLEDGE, BANNED_PHRASES } from '@hermes/shared';
 import { BaseAgent } from './base.agent.js';
 
-const SYSTEM_PROMPT = `You are an experienced B2B sales professional representing T3 Digiport.
+const ERP_BRIEF = `T3 Digiport provides both standard and fully customised ERP for metal-processing and manufacturing operations.
+Potential areas include dimensions/grades/location-aware stock, full sheets and usable offcuts,
+quotations and purchasing, jobs/WIP, production, cost visibility and traceability.
+Mention a feature only if it is supported by the documented product capabilities supplied with the case.
+Do not assume a prospect wants to replace their existing ERP. Discuss integration or a targeted workflow where appropriate.`;
 
-T3 Digiport offers AEO (Answer Engine Optimization) and SEO services for businesses.
+function serviceKnowledge(mode: ConversationContext['serviceMode']): string {
+  if (mode === 'erp') return ERP_BRIEF;
+  if (mode === 'seo') return 'T3 Digiport offers SEO services. ' + T3_SEO_KNOWLEDGE.shortDescription;
+  return 'T3 Digiport offers AEO services. ' + T3_AEO_KNOWLEDGE.shortDescription;
+}
 
-ABOUT T3:
-${T3_AEO_KNOWLEDGE.shortDescription}
-
-YOUR JOB:
-Read a prospect's email reply, understand exactly what they said, and write a natural, intelligent response.
-
-RESPONSE PRINCIPLES:
-1. You are a real person, not a bot. Write accordingly.
-2. Address exactly what the prospect said — do not sidestep their message.
-3. If they asked a question, answer it directly.
-4. If they raised an objection, acknowledge it genuinely, then explore whether there's still value.
-5. If they said "not now", acknowledge with grace, note the timing, and end warmly.
-6. If they said "not interested" or "remove me", say a professional farewell. Nothing more.
-7. If they want a meeting, suggest specific next steps — don't just say "let's chat".
-8. If they want info, send relevant, specific information — not a generic brochure request.
-9. Never be pushy. One soft follow-up question maximum.
-10. Never pretend you personally researched their website this morning unless it's true.
-11. Keep it short — 60–120 words. Nobody wants a wall of text in reply to a reply.
-
-BANNED PHRASES:
-${BANNED_PHRASES.map((p) => `- "${p}"`).join('\n')}
-
-Additional banned for replies: "as I mentioned", "per my previous email", "circling back", "just wanted to follow up"
-
-Output valid JSON only.`;
+const SYSTEM_PROMPT = `You are an assistant drafting a B2B sales representative's response on behalf of T3 Digiport.
+Write naturally and concisely (ideally 50–100 words), with no marketing fluff.
+You must answer the actual question or objection, not sell unrelated services.
+Do not fabricate product features, case studies, pricing, timelines, testimonials, availability or meeting links.
+Do not claim to be a human or conceal that an assistant helps draft messages.
+Use only known service capabilities and confirmed thread facts. If information is missing, ask one concise question or flag it for sales review.
+If the prospect says no, respect the answer; do not try to overcome it.
+For an explicit unsubscribe or a definitive rejection, generate no outbound message.
+For scheduling, propose a next step without fabricating calendar slots.
+Sign as T3 Digiport unless a sender's identity has been supplied elsewhere.
+Avoid: ${BANNED_PHRASES.join(', ')}.
+Respond with JSON only.`;
 
 export class ConversationReplyAgent extends BaseAgent<ConversationContext, ConversationReply> {
   protected readonly agentName = 'ConversationReplyAgent';
 
   async run(input: ConversationContext): Promise<AgentResult<ConversationReply>> {
     return this.wrap(async () => {
+      if (input.intent === 'UNSUBSCRIBE' || input.intent === 'NEGATIVE') {
+        throw new Error('No reply draft permitted for suppressed or rejecting prospects');
+      }
       const context = this.buildContext(input);
+      const followUpInstruction = input.draftPurpose === 'scheduled_follow_up'
+        ? '\nThis is a follow-up draft to be reviewed by a human, only because the prospect previously invited contact at this time. Do NOT write a fresh pitch. Refer to the actual prior exchange and reason; ask one simple question whether revisiting this is useful now. Never pretend you sent an earlier follow-up or invent a date, meeting time, or product result.'
+        : '';
       const { content } = await this.chat(
-        SYSTEM_PROMPT,
+        SYSTEM_PROMPT + '\nSERVICE KNOWLEDGE:\n' + serviceKnowledge(input.serviceMode) + followUpInstruction,
         `${context}
 
 Write the reply. Return JSON:
 {
   "subject": "Re: [original subject] or a new subject if needed",
-  "body": "the full reply text, plain text, natural, signed as ${T3_AEO_KNOWLEDGE.senderName}",
+  "body": "the full reply text, plain text, natural, signed as T3 Digiport",
   "rationale": "one sentence explaining why you responded this way",
   "suggestedFollowUpDays": null
 }
 
 For NOT_NOW: set suggestedFollowUpDays to the appropriate number.
-For NEGATIVE or UNSUBSCRIBE: body should be a graceful goodbye, nothing else.`,
+For NEGATIVE or UNSUBSCRIBE: no draft must be generated.`,
         { jsonMode: true, temperature: 0.7 },
       );
 
@@ -62,8 +63,10 @@ For NEGATIVE or UNSUBSCRIBE: body should be a graceful goodbye, nothing else.`,
   private buildContext(input: ConversationContext): string {
     const parts = [
       `Prospect: ${input.contactName} (${input.contactRole}) at ${input.companyName}`,
-      `Industry: ${input.serviceMode === 'aeo' ? 'AEO target' : 'ERP target'}`,
-      `Company AEO context: ${input.researchSummary}`,
+      `Service: ${input.serviceMode.toUpperCase()}`,
+      `Draft purpose: ${input.draftPurpose ?? 'inbound_reply'}`,
+      ...(input.followUpReason ? [`Documented follow-up reason: ${input.followUpReason}`] : []),
+      `Verified company context (may contain unverified assumptions; never state them as facts): ${input.researchSummary}`,
       ...(input.primaryOpportunity ? [`Primary opportunity: ${input.primaryOpportunity}`] : []),
       `\nOriginal email sent:`,
       `Subject: ${input.originalEmail.subject}`,

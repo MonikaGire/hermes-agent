@@ -27,10 +27,22 @@ const importSchema = z.object({
       label: z.string().optional(),
     })),
     source: z.enum(['google', 'ai', 'maps']),
+    sourceUrl: z.string().url().optional(),
+    sourcePublishedAt: z.string().optional(),
+    signalType: z.enum(['software_selection', 'operational_pain']).optional(),
+    verification: z.literal('search_excerpt').optional(),
   })),
   autoResearch: z.boolean().default(false),
   autoEmail: z.boolean().default(false),
   serviceMode: z.enum(['ERP', 'AEO', 'SEO']).default('ERP'),
+});
+
+const evidenceReviewSchema = z.object({
+  sourceUrl: z.string().url(),
+  evidenceText: z.string().trim().min(25).max(2000),
+  observedAt: z.string().min(10),
+  signalType: z.enum(['software_selection', 'operational_pain']),
+  vendorAlreadySelected: z.boolean(),
 });
 
 const scrapeSchema = z.object({
@@ -71,5 +83,14 @@ export class DiscoveryController {
     const params = mapsSearchSchema.parse(req.body);
     const results = await this.svc.searchWithMaps(params);
     sendSuccess(res, results, `Found ${results.length} companies via Google Maps`);
+  }
+  async reviewEvidence(req: Request, res: Response): Promise<void> {
+    const payload = evidenceReviewSchema.parse(req.body);
+    const data = await this.svc.reviewErpEvidence({
+      companyId: req.params['companyId'] as string,
+      reviewerId: req.user!.sub,
+      ...payload,
+    });
+    sendSuccess(res, data, 'ERP evidence reviewed');
   }
 }

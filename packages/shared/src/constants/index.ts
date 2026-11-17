@@ -175,3 +175,22 @@ export const BANNED_PHRASES = [
   'as per my last email',
   'i wanted to follow up',
 ] as const;
+
+/**
+ * ERP outbound discovery targets. Keep separate from the historic multi-service
+ * TARGET_INDUSTRIES so SEO/AEO workflows are not changed unexpectedly.
+ */
+export const ERP_TARGET_INDUSTRIES = [
+  'Sheet metal fabrication',
+  'Steel service centre',
+  'Laser cutting and metal bending',
+  'CNC machining and precision metalwork',
+  'Stainless steel processing',
+  'Metal stockholding and slitting',
+] as const;
+
+export const ERP_TARGET_COUNTRIES = [
+  'USA', 'UK', 'Australia', 'Canada', 'UAE', 'Singapore',
+  'Germany', 'South Africa', 'Poland', 'Mexico', 'Brazil',
+  'Saudi Arabia', 'New Zealand', 'Malaysia', 'India',
+] as const;

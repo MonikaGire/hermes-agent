@@ -38,3 +38,6 @@ export type { SEOOrchestrationInput, SEOOrchestrationResult } from './seo-orches
 export { ReplyIntentAgent } from './reply-intent.agent.js';
 export type { ReplyIntentInput } from './reply-intent.agent.js';
 export { ConversationReplyAgent } from './conversation-reply.agent.js';
+
+export { qualifyErpEvidence, publicCompanyDomain } from './erp-evidence.js';
+export type { ErpSourceEvidence, ErpSignalType, QualifiedErpEvidence } from './erp-evidence.js';
