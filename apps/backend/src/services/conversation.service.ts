@@ -6,6 +6,7 @@ import { logActivity } from './activity.service.js';
 import { assertCompanyNotSuppressed } from './suppression.service.js';
 import { inboxPollWindow } from '../jobs/reply-poll-policy.js';
 import { plainTextToSafeHtml } from '../utils/email-content.js';
+import { explicitContactStop } from './reply-safety.policy.js';
 
 export class ConversationService {
   private readonly gmail = new GmailInboxService();
@@ -182,6 +183,9 @@ export class ConversationService {
     if (!draft || draft.conversationId !== conversationId) {
       throw new AppError('Draft not found', 404);
     }
+    if (draft.direction !== 'DRAFT' || draft.sentAt || draft.approvedAt) {
+      throw new AppError('Cannot discard a sent or approved message', 400);
+    }
     await prisma.conversationMessage.delete({ where: { id: messageId } });
     await prisma.conversation.update({
       where: { id: conversationId },
@@ -192,7 +196,10 @@ export class ConversationService {
 
   async regenerateDraft(conversationId: string) {
     const conversation = await this.getById(conversationId);
-    if (conversation.status === 'SUPPRESSED') throw new AppError('Cannot draft for a suppressed conversation', 400);
+    if (conversation.status === 'SUPPRESSED' || conversation.status === 'REPLY_SENDING') {
+      throw new AppError('Cannot regenerate a suppressed or currently sending reply', 400);
+    }
+    await assertCompanyNotSuppressed(conversation.companyId);
 
     // Delete existing draft
     await prisma.conversationMessage.deleteMany({
@@ -345,6 +352,8 @@ export class ConversationService {
 
     if (!conversation || conversation.status === 'SUPPRESSED') return null;
 
+    if (conversation.status === 'SUPPRESSED') return null;
+
     // Skip duplicates
     const existing = await prisma.conversationMessage.findFirst({ where: { gmailMessageId: reply.id } });
     if (existing) return null;
@@ -354,7 +363,12 @@ export class ConversationService {
     const intentAgent = new ReplyIntentAgent();
     const originalEmail = conversation.email;
 
-    const intentResult = await intentAgent.run({
+    const hardStop = explicitContactStop(reply.body);
+    const intentResult = hardStop ? { data: {
+      intent: hardStop, confidence: 1,
+      summary: 'Prospect explicitly requested no further contact.',
+      suggestedAction: 'Suppress this company and stop all outreach.',
+    } } : await intentAgent.run({
       inboundEmailBody: reply.body,
       conversationContext: {
         companyName: originalEmail.company.name,
@@ -390,19 +404,30 @@ export class ConversationService {
         where: { id: conversation.id },
         data: { status: 'SUPPRESSED', intent, lastMessageAt: reply.receivedAt, suppressedAt: new Date() },
       });
+      await logActivity({
+        type: 'conversation.suppressed',
+        entityType: 'conversation', entityId: conversation.id,
+        companyId: conversation.companyId,
+        meta: { intent, reason: intentDetails.summary },
+      });
       await this.gmail.markAsRead(reply.id);
       return { conversationId: conversation.id, gmailMessageId: reply.id, intent, draftReady: false };
     }
 
     // Schedule follow-up for NOT_NOW
-    if (intent === 'NOT_NOW' && intentDetails.followUpAt) {
+    const followUpTime = typeof intentDetails.followUpAt === 'string'
+      ? new Date(intentDetails.followUpAt) : null;
+    if (intent === 'NOT_NOW' && followUpTime &&
+      !Number.isNaN(followUpTime.getTime()) &&
+      followUpTime > new Date() &&
+      followUpTime < new Date(Date.now() + 365 * 86_400_000)) {
       await prisma.conversation.update({
         where: { id: conversation.id },
         data: {
           status: 'FOLLOW_UP_SCHEDULED',
           intent,
           lastMessageAt: reply.receivedAt,
-          followUpAt: new Date(intentDetails.followUpAt),
+          followUpAt: followUpTime,
           followUpNote: intentDetails.summary,
         },
       });
