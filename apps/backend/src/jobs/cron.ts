@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { logger } from '../config/logger.js';
 import { getQueue, QUEUE_NAMES } from '../queues/index.js';
 import { prisma } from '@hermes/database';
+import { repairAbandonedFollowUps } from '../services/follow-up.service.js';
 import { ERP_TARGET_INDUSTRIES, ERP_TARGET_COUNTRIES } from '@hermes/shared';
 
 export function initCronJobs(): void {
@@ -98,6 +99,7 @@ export function initCronJobs(): void {
   cron.schedule('0 */1 * * *', async () => {
     logger.info('Cron: Checking due follow-up conversations');
     try {
+      await repairAbandonedFollowUps();
       const dueConversations = await prisma.conversation.findMany({
         where: {
           status: 'FOLLOW_UP_SCHEDULED',
@@ -110,7 +112,10 @@ export function initCronJobs(): void {
         // Queue each for reply processing to generate fresh follow-up draft
         const queue = getQueue(QUEUE_NAMES.REPLY_PROCESSING);
         for (const conv of dueConversations) {
-          await queue.add('follow-up-due', { conversationId: conv.id });
+          await queue.add('follow-up-due', { conversationId: conv.id }, {
+            jobId: 'followup-' + conv.id + '-' + (conv.followUpAt?.getTime() ?? 0),
+            removeOnComplete: { count: 100 },
+          });
         }
       }
     } catch (err) {
@@ -134,5 +139,5 @@ export function initCronJobs(): void {
     }
   });
 
-  logger.info('Cron jobs initialized (4 schedules)');
+  logger.info('Cron jobs initialized (6 schedules)');
 }
