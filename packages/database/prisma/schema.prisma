@@ -192,6 +192,7 @@ enum EmailStatus {
   DRAFT
   PENDING_APPROVAL
   APPROVED
+  SENDING
   SENT
   SKIPPED
 }
