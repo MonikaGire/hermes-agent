@@ -38,7 +38,7 @@ for ($attempt=0; $attempt -lt 30; $attempt++) {
     $response = Invoke-RestMethod -Uri $url -TimeoutSec 10 -Method Get
     if ($null -ne $response.results) {
       Write-Host 'Local SearXNG JSON search is ready.' -ForegroundColor Green
-      exit 0
+      return
     }
   } catch { }
   Start-Sleep -Seconds 2
