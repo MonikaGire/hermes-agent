@@ -24,6 +24,10 @@ jobs:
           node-version: '22'
       - name: Evidence-first prospect qualification tests
         run: node --experimental-strip-types --test tests/*.test.mjs
+      - name: Windows pilot script syntax and offline self-check
+        run: |
+          node --check scripts/metal-pilot.mjs
+          node scripts/metal-pilot.mjs --self-test
 
   typescript:
     runs-on: ubuntu-latest
