@@ -2,23 +2,29 @@ import cron from 'node-cron';
 import { logger } from '../config/logger.js';
 import { getQueue, QUEUE_NAMES } from '../queues/index.js';
 import { prisma } from '@hermes/database';
-import { TARGET_INDUSTRIES, TARGET_COUNTRIES } from '@hermes/shared';
+import { ERP_TARGET_INDUSTRIES, ERP_TARGET_COUNTRIES } from '@hermes/shared';
 
 export function initCronJobs(): void {
-  // Auto-discover new prospects every day at 9:00 AM UTC
-  cron.schedule('0 9 * * *', async () => {
-    logger.info('Cron: Starting daily prospect discovery');
+  // A bounded daily sample across rotating international metal markets, 8 AM IST.
+  // Default: 1 sector x 4 countries x 5 search recipes = 20 search requests/day.
+  cron.schedule('0 8 * * *', async () => {
+    logger.info('Cron: Starting evidence-first metal ERP discovery');
     try {
+      const day = Math.floor(Date.now() / 86_400_000);
+      const industry = ERP_TARGET_INDUSTRIES[day % ERP_TARGET_INDUSTRIES.length]!;
+      const countries = Array.from({ length: 4 }, (_, index) =>
+        ERP_TARGET_COUNTRIES[(day * 4 + index) % ERP_TARGET_COUNTRIES.length]!,
+      );
       const queue = getQueue(QUEUE_NAMES.PROSPECT_DISCOVERY);
-      await queue.add('daily-discover', {
-        industries: TARGET_INDUSTRIES as unknown as string[],
-        countries: TARGET_COUNTRIES as unknown as string[],
+      await queue.add('daily-metal-erp', {
+        industries: [industry],
+        countries,
         limit: 20,
-      });
+      }, { jobId: 'daily-metal-erp-' + day, removeOnComplete: { count: 20 } });
     } catch (err) {
       logger.error('Cron: prospect discovery failed', { error: err });
     }
-  });
+  }, { timezone: 'Asia/Kolkata' });
 
   // Research all NEW prospects that haven't been researched (every 2 hours)
   cron.schedule('0 */2 * * *', async () => {
