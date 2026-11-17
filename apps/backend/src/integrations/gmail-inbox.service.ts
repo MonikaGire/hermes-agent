@@ -10,6 +10,7 @@ export interface GmailMessage {
   body: string;
   receivedAt: Date;
   inReplyTo?: string;
+  rfcMessageId?: string;
   references?: string[];
 }
 
@@ -125,6 +126,9 @@ export class GmailInboxService {
       const gmail = google.gmail({ version: 'v1', auth });
 
       const from = process.env['SMTP_FROM'] ?? process.env['SMTP_USER'] ?? '';
+      if (!/^<[^<>\r\n]+@[^<>\r\n]+>$/.test(options.inReplyTo.trim())) {
+        throw new Error('Gmail reply requires an RFC Message-ID, not a Gmail thread ID');
+      }
       const rawMessage = this.buildRawMessage({
         from,
         to: options.to,
@@ -148,6 +152,27 @@ export class GmailInboxService {
       };
     } catch (err) {
       logger.error('GmailInboxService: sendReply failed', { error: err });
+      return null;
+    }
+  }
+
+  /** Resolve the RFC Message-ID of an existing Gmail message for proper threading. */
+  async getRfcMessageId(gmailMessageId: string): Promise<string | null> {
+    if (!this.isConfigured || !gmailMessageId) return null;
+    try {
+      const auth = this.getOAuth2Client();
+      const gmail = google.gmail({ version: 'v1', auth });
+      const response = await gmail.users.messages.get({
+        userId: 'me',
+        id: gmailMessageId,
+        format: 'metadata',
+        metadataHeaders: ['Message-ID'],
+      });
+      return response.data.payload?.headers?.find(
+        (h) => h.name?.toLowerCase() === 'message-id',
+      )?.value ?? null;
+    } catch (error) {
+      logger.warn('Unable to resolve RFC Message-ID for Gmail reply', { gmailMessageId, error });
       return null;
     }
   }
@@ -193,6 +218,7 @@ export class GmailInboxService {
         body,
         receivedAt,
         inReplyTo: headers['in-reply-to'] ?? undefined,
+        rfcMessageId: headers['message-id'] ?? undefined,
         references,
       };
     } catch {
@@ -226,9 +252,9 @@ export class GmailInboxService {
     references: string;
   }): string {
     const lines = [
-      `From: ${opts.from}`,
-      `To: ${opts.to}`,
-      `Subject: ${opts.subject}`,
+      `From: ${opts.from.replace(/[\r\n]/g, ' ')}`,
+      `To: ${opts.to.replace(/[\r\n]/g, ' ')}`,
+      `Subject: ${opts.subject.replace(/[\r\n]/g, ' ')}`
       `In-Reply-To: ${opts.inReplyTo}`,
       `References: ${opts.references}`,
       `MIME-Version: 1.0`,
