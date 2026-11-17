@@ -13,6 +13,7 @@ export interface EmailWriterInput {
   emailAngle: string;
   tone?: 'professional' | 'casual' | 'direct';
   previousVersions?: string[];
+  verifiedEvidence?: { sourceUrl: string; evidenceText: string; signalType: 'software_selection' | 'operational_pain' };
 }
 
 const SYSTEM_PROMPT = `You are an expert B2B cold email writer specializing in manufacturing ERP sales.
@@ -26,6 +27,9 @@ WRITING RULES:
 6. Never use generic openers. Each email must be genuinely personalized.
 7. CTA must be a question or soft ask, never pushy.
 8. Subject line: under 8 words. No emojis. No "Quick question" opener.
+9. Only cite factual company-specific problems that are supported by the explicitly approved evidence. Never pretend an operational clue proves they want to buy new ERP.
+10. Company research summaries and AI-inferred pain are context, not proof. Ask a discovery question rather than asserting an unverified pain.
+11. No invented names, quantities, case studies, customer results, or guarantees.
 
 BANNED PHRASES (never use any of these):
 ${BANNED_PHRASES.map((p) => `- "${p}"`).join('\n')}
@@ -97,6 +101,16 @@ Then set wordCount to the actual word count of the body.`,
       `Email angle: ${input.emailAngle}`,
       `Tone: ${input.tone ?? 'professional'}`,
     );
+
+    if (input.verifiedEvidence) {
+      parts.push(
+        'Approved first-party evidence (the only source for company-specific claims):',
+        input.verifiedEvidence.evidenceText,
+        'Original source: ' + input.verifiedEvidence.sourceUrl,
+        'Classification: ' + input.verifiedEvidence.signalType,
+        'Do not say the prospect is buying ERP unless the evidence explicitly establishes that.',
+      );
+    }
 
     if (input.previousVersions?.length) {
       parts.push(`\nPrevious versions to avoid similarity with:\n${input.previousVersions.join('\n---\n')}`);
