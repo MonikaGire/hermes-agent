@@ -99,7 +99,7 @@ export function createReplyProcessingWorker(): Worker {
 }
 
 async function processOneReply(
-  reply: { id: string; threadId: string; subject: string; from: string; to: string; body: string; receivedAt: Date; inReplyTo?: string },
+  reply: { id: string; threadId: string; subject: string; from: string; to: string; body: string; receivedAt: Date; inReplyTo?: string; rfcMessageId?: string },
   gmail: GmailInboxService,
 ): Promise<ProcessedReply | null> {
   // 1. Find matching conversation by threadId or by matching the from-email to a sent email contact
@@ -204,6 +204,7 @@ async function processOneReply(
       fromEmail: reply.from,
       toEmail: reply.to,
       gmailMessageId: reply.id,
+      rfcMessageId: reply.rfcMessageId,
       intent,
       intentDetails: intentDetails as unknown as Prisma.InputJsonValue,
     },
