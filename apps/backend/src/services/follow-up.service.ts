@@ -4,21 +4,7 @@ import type { ReplyIntentResult, ServiceMode } from '@hermes/shared';
 import { logActivity } from './activity.service.js';
 import { logger } from '../config/logger.js';
 
-export interface DueFollowUp {
-  status: string;
-  followUpAt: Date | null;
-  intent: string | null;
-  suppressedAt?: Date | null;
-}
-
-export function isPermittedDueFollowUp(item: DueFollowUp, now = new Date()): boolean {
-  return item.status === 'FOLLOW_UP_SCHEDULED' &&
-    item.intent === 'NOT_NOW' &&
-    !item.suppressedAt &&
-    item.followUpAt instanceof Date &&
-    !Number.isNaN(item.followUpAt.getTime()) &&
-    item.followUpAt.getTime() <= now.getTime();
-}
+import { isPermittedDueFollowUp } from './follow-up-policy.js';
 
 /**
  * Draft ONLY. Never sends email. The status transition acts as an atomic
